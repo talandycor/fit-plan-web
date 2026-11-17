@@ -1,7 +1,21 @@
+
 const STORAGE_KEY = "fitplan-library-v1";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+const DEFAULT_CATEGORIES = [
+  "Fuerza tren superior",
+  "Fuerza tren inferior",
+  "Fuerza cuerpo completo",
+  "Movilidad tren superior",
+  "Movilidad tren inferior",
+  "Movilidad cuerpo completo",
+  "Core y abdominales",
+  "Cardio",
+  "Estiramientos",
+  "Rehabilitación y prevención"
+];
 
 const today = () => {
   const d = new Date();
@@ -22,15 +36,33 @@ let state = loadState();
 let currentView = "exercises";
 let calendarDate = new Date();
 let selectedImage = "";
+let selectedCategory = "";
 let toastTimer;
 
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (saved && Array.isArray(saved.exercises) &&
-        Array.isArray(saved.plans) && Array.isArray(saved.sessions)) return saved;
+        Array.isArray(saved.plans) && Array.isArray(saved.sessions)) {
+      saved.categories = Array.isArray(saved.categories)
+        ? saved.categories
+        : DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }));
+
+      // Migración segura: los ejercicios antiguos quedan sin categoría.
+      saved.exercises = saved.exercises.map(ex => ({
+        ...ex,
+        categories: Array.isArray(ex.categories) ? ex.categories : []
+      }));
+
+      return saved;
+    }
   } catch (e) {}
-  return { exercises: [], plans: [], sessions: [] };
+  return {
+    exercises: [],
+    plans: [],
+    sessions: [],
+    categories: DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }))
+  };
 }
 
 function saveState() {
@@ -92,204 +124,185 @@ function emptyState(icon, title, message, button = "") {
   </div>`;
 }
 
+// ---------- BIBLIOTECA Y CARPETAS ----------
+
+function categoryCount(categoryId) {
+  return state.exercises.filter(ex => (ex.categories || []).includes(categoryId)).length;
+}
+
 function renderExercises() {
-  const cards = state.exercises.map(ex => `
+  const categories = state.categories.map(category => `
+    <button class="folder-card ${selectedCategory === category.id ? "selected" : ""}"
+      data-action="open-category" data-id="${category.id}">
+      <span class="folder-icon">📁</span>
+      <span class="folder-name">${escapeHTML(category.name)}</span>
+      <span class="folder-count">${categoryCount(category.id)} ejercicios</span>
+    </button>
+  `).join("");
+
+  const unassigned = state.exercises.filter(ex => !ex.categories?.length);
+  const isUnassigned = selectedCategory === "unassigned";
+  const current = state.categories.find(c => c.id === selectedCategory);
+
+  let visibleExercises = [];
+  if (isUnassigned) visibleExercises = unassigned;
+  else if (current) {
+    visibleExercises = state.exercises.filter(ex => (ex.categories || []).includes(current.id));
+  }
+
+  visibleExercises.sort((a,b) => a.name.localeCompare(b.name, "es", { sensitivity:"base" }));
+
+  const cards = visibleExercises.map(ex => `
     <article class="card">
       <img class="exercise-image" src="${escapeHTML(ex.image || placeholder)}"
         alt="${escapeHTML(ex.name)}" onerror="this.src='${placeholder}'">
       <div class="card-body">
         <div class="card-title-row">
           <h3>${escapeHTML(ex.name)}</h3>
-          <span class="pill">${escapeHTML(ex.muscle || "General")}</span>
+        </div>
+        <div class="exercise-categories">
+          ${(ex.categories || []).map(id => {
+            const cat = state.categories.find(c => c.id === id);
+            return cat ? `<span class="pill">${escapeHTML(cat.name)}</span>` : "";
+          }).join("")}
+          ${!ex.categories?.length ? `<span class="pill">Sin categoría</span>` : ""}
         </div>
         <div class="card-actions">
           <button class="btn ghost small" data-action="edit-exercise" data-id="${ex.id}">Editar</button>
           <button class="btn ghost small" data-action="delete-exercise" data-id="${ex.id}">Eliminar</button>
         </div>
       </div>
-    </article>`).join("");
+    </article>
+  `).join("");
 
-  return `
+  const folderView = `
     <div class="section-head">
-      <div><h2>Biblioteca de ejercicios</h2>
-      <p class="muted">Tus ejercicios, listos para reutilizar en cualquier plan.</p></div>
+      <div>
+        <h2>Biblioteca de ejercicios</h2>
+        <p class="muted">Organiza tus ejercicios en carpetas. Un ejercicio puede estar en varias.</p>
+      </div>
       <button class="btn" data-action="new-exercise">+ Añadir</button>
     </div>
-    ${cards ? `<div class="card-grid">${cards}</div>` :
-      emptyState("＋", "Tu biblioteca empieza aquí",
-        "Añade ejercicios una sola vez y podrás utilizarlos en todos tus planes.",
-        `<button class="btn" data-action="new-exercise">Crear primer ejercicio</button>`)}
+    <div class="folder-toolbar">
+      <h3>Mis categorías</h3>
+      <button class="btn ghost small" data-action="manage-categories">Gestionar categorías</button>
+    </div>
+    <div class="folder-grid">
+      ${categories}
+      <button class="folder-card add-folder" data-action="new-category">
+        <span class="folder-icon">＋</span>
+        <span class="folder-name">Nueva categoría</span>
+        <span class="folder-count">Crear carpeta</span>
+      </button>
+    </div>
+    <button class="unassigned-link ${isUnassigned ? "active" : ""}"
+      data-action="open-category" data-id="unassigned">
+      Sin categoría <span>${unassigned.length}</span>
+    </button>
   `;
-}
 
-function renderPlans() {
-  const cards = state.plans.map(plan => {
-    const names = plan.items.map(item => {
-      const ex = state.exercises.find(e => e.id === item.exerciseId);
-      return `<span>• ${escapeHTML(ex?.name || item.name || "Ejercicio eliminado")} — ${item.sets} × ${item.reps}</span>`;
-    }).join("");
+  if (!selectedCategory) return folderView;
 
-    return `<article class="card plan-card">
-      <div class="card-title-row">
-        <h3>${escapeHTML(plan.name)}</h3>
-        <span class="pill">${plan.items.length} ejercicios</span>
-      </div>
-      <div class="plan-exercises">${names || "Sin ejercicios todavía"}</div>
-      <div class="card-actions">
-        <button class="btn ghost small" data-action="edit-plan" data-id="${plan.id}">Editar</button>
-        <button class="btn ghost small" data-action="start-plan" data-id="${plan.id}">Entrenar</button>
-        <button class="btn danger small" data-action="delete-plan" data-id="${plan.id}">Eliminar</button>
-      </div>
-    </article>`;
-  }).join("");
-
+  const title = isUnassigned ? "Sin categoría" : current?.name || "Categoría";
   return `
-    <div class="section-head">
-      <div><h2>Mis planes</h2>
-      <p class="muted">Combina tus ejercicios y configura cada rutina.</p></div>
-      <button class="btn" data-action="new-plan">+ Crear plan</button>
-    </div>
-    ${cards ? `<div class="card-grid">${cards}</div>` :
-      emptyState("▤", "Todavía no tienes planes",
-        "Crea un plan y añade ejercicios de tu biblioteca.",
-        `<button class="btn" data-action="new-plan">Crear primer plan</button>`)}
-  `;
-}
-
-function monthName(date) {
-  return date.toLocaleDateString("es-ES", { month: "long", year: "numeric" });
-}
-
-function renderCalendar() {
-  const year = calendarDate.getFullYear();
-  const month = calendarDate.getMonth();
-  const first = new Date(year, month, 1);
-  const startOffset = (first.getDay() + 6) % 7;
-  const start = new Date(year, month, 1 - startOffset);
-  const weekdays = ["L", "M", "X", "J", "V", "S", "D"];
-
-  let days = weekdays.map(d => `<div class="calendar-weekday">${d}</div>`).join("");
-
-  for (let i = 0; i < 42; i++) {
-    const date = new Date(start);
-    date.setDate(start.getDate() + i);
-    const key = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
-    const sessions = state.sessions.filter(s => s.date === key);
-    const classes = [
-      "day",
-      date.getMonth() !== month ? "outside" : "",
-      key === today() ? "today" : "",
-      sessions.length ? "has-session" : ""
-    ].filter(Boolean).join(" ");
-
-    days += `<button class="${classes}" data-action="calendar-day" data-date="${key}">
-      <span class="day-number">${date.getDate()}</span>
-      ${sessions.map(s => `<span class="day-event">${escapeHTML(s.planName)}</span>`).join("")}
-    </button>`;
-  }
-
-  const upcoming = [...state.sessions].sort((a,b) => b.date.localeCompare(a.date))
-    .slice(0, 8).map(s => `
-      <div class="session-row">
-        <strong>${escapeHTML(s.planName)}</strong>
-        <p class="muted">${formatDate(s.date)} · ${s.exercises.length} ejercicios</p>
-        <button class="btn ghost small" data-action="view-session" data-id="${s.id}">Ver sesión</button>
-      </div>`).join("");
-
-  return `
-    <div class="section-head">
-      <div><h2>Calendario</h2>
-      <p class="muted">Selecciona un día para registrar tu entrenamiento.</p></div>
-      <button class="btn" data-action="calendar-today">Hoy</button>
-    </div>
-    <div class="card" style="padding:16px">
-      <div class="calendar-head">
-        <button class="btn ghost small" data-action="prev-month">←</button>
-        <h3 style="text-transform:capitalize">${monthName(calendarDate)}</h3>
-        <button class="btn ghost small" data-action="next-month">→</button>
+    ${folderView}
+    <div class="category-content">
+      <div class="section-head category-heading">
+        <div>
+          <button class="back-link" data-action="back-folders">← Todas las carpetas</button>
+          <h2>${escapeHTML(title)}</h2>
+          <p class="muted">${visibleExercises.length} ejercicios · Orden alfabético</p>
+        </div>
+        ${current ? `<button class="btn ghost small" data-action="edit-category" data-id="${current.id}">Editar carpeta</button>` : ""}
       </div>
-      <div class="calendar-grid">${days}</div>
-    </div>
-    <div class="session-list">
-      <h2>Últimas sesiones</h2>
-      ${upcoming || `<p class="muted">Todavía no has registrado sesiones.</p>`}
-    </div>
-  `;
-}
-
-function renderProgress() {
-  const sessions = [...state.sessions].sort((a,b) => b.date.localeCompare(a.date));
-  const exerciseCount = new Set(sessions.flatMap(s => s.exercises.map(e => e.exerciseId))).size;
-  const totalExercises = sessions.reduce((sum, s) => sum + s.exercises.length, 0);
-
-  const progress = {};
-  sessions.forEach(session => {
-    session.exercises.forEach(ex => {
-      if (!progress[ex.exerciseId]) progress[ex.exerciseId] = { name: ex.name, records: [] };
-      progress[ex.exerciseId].records.push({
-        date: session.date,
-        weight: Number(ex.weight) || 0,
-        reps: ex.reps,
-        sets: ex.sets
-      });
-    });
-  });
-
-  const rows = Object.values(progress).map(item => {
-    const records = item.records;
-    const best = Math.max(0, ...records.map(r => r.weight));
-    const latest = records[0];
-    return `<div class="progress-item">
-      <strong>${escapeHTML(item.name)}</strong>
-      <p>Último registro: ${latest.weight || "Sin peso"}${latest.weight ? " kg" : ""}
-      · ${latest.sets} series × ${latest.reps} repeticiones</p>
-      <p>Mejor peso registrado: ${best ? `${best} kg` : "Sin datos de peso"} · ${records.length} registros</p>
-    </div>`;
-  }).join("");
-
-  return `
-    <div class="section-head">
-      <div><h2>Tu progreso</h2>
-      <p class="muted">Resumen de tus entrenamientos registrados.</p></div>
-    </div>
-    <div class="stat-grid">
-      <div class="stat"><strong>${sessions.length}</strong><span>Sesiones</span></div>
-      <div class="stat"><strong>${exerciseCount}</strong><span>Ejercicios trabajados</span></div>
-      <div class="stat"><strong>${totalExercises}</strong><span>Registros de ejercicio</span></div>
-    </div>
-    <div class="card" style="padding:18px">
-      <h3>Evolución por ejercicio</h3>
-      ${rows || `<p class="muted">Cuando registres tus primeras sesiones, aquí aparecerá tu evolución.</p>`}
+      ${cards ? `<div class="card-grid">${cards}</div>` :
+        emptyState("📂", "Esta carpeta está vacía",
+          "Añade ejercicios o edita uno existente para asignarlo a esta categoría.",
+          `<button class="btn" data-action="new-exercise">Añadir ejercicio</button>`)}
     </div>
   `;
 }
 
-function formatDate(date) {
-  return new Date(`${date}T12:00:00`).toLocaleDateString("es-ES", {
-    day: "numeric", month: "long", year: "numeric"
-  });
+function categoryForm(category = {}) {
+  openModal(`
+    <h2>${category.id ? "Editar categoría" : "Nueva categoría"}</h2>
+    <form id="category-form" data-id="${category.id || ""}">
+      <div class="field">
+        <label for="category-name">Nombre de la categoría *</label>
+        <input id="category-name" name="name" required maxlength="60"
+          value="${escapeHTML(category.name || "")}" placeholder="Ej. Fuerza tren superior">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" data-action="close-modal">Cancelar</button>
+        <button class="btn" type="submit">Guardar categoría</button>
+      </div>
+    </form>
+  `);
+}
+
+function manageCategories() {
+  const rows = state.categories.map(cat => `
+    <div class="category-manage-row">
+      <span>📁 ${escapeHTML(cat.name)}</span>
+      <span class="category-manage-actions">
+        <button class="btn ghost small" data-action="edit-category" data-id="${cat.id}">Editar</button>
+        <button class="btn danger small" data-action="delete-category" data-id="${cat.id}">Eliminar</button>
+      </span>
+    </div>
+  `).join("");
+
+  openModal(`
+    <h2>Gestionar categorías</h2>
+    <p class="muted">Puedes cambiar el nombre o eliminar las carpetas que ya no necesites.</p>
+    ${rows || `<p class="muted">Todavía no hay categorías.</p>`}
+    <div class="modal-actions">
+      <button class="btn ghost" data-action="close-modal">Cerrar</button>
+      <button class="btn" data-action="new-category">+ Nueva categoría</button>
+    </div>
+  `);
 }
 
 // ---------- EJERCICIOS ----------
 
 function exerciseForm(ex = {}) {
   selectedImage = ex.image || "";
+  const selected = ex.categories || [];
+
   openModal(`
     <h2>${ex.id ? "Editar ejercicio" : "Nuevo ejercicio"}</h2>
-    <p class="muted">La ficha del ejercicio se podrá reutilizar en distintos planes.</p>
+    <p class="muted">La ficha del ejercicio se podrá reutilizar en distintos planes y categorías.</p>
     <form id="exercise-form" data-id="${ex.id || ""}">
       <div class="field">
         <label for="ex-name">Nombre del ejercicio *</label>
         <input id="ex-name" name="name" required maxlength="70"
           value="${escapeHTML(ex.name || "")}" placeholder="Ej. Press banca">
       </div>
+
       <div class="field">
-        <label for="ex-muscle">Grupo muscular</label>
+        <span class="field-label">Categorías</span>
+        <p class="help">Puedes seleccionar varias. El ejercicio aparecerá en todas las carpetas elegidas.</p>
+        <div class="category-checkboxes">
+          ${state.categories.map(cat => `
+            <label class="category-check">
+              <input type="checkbox" name="categories" value="${cat.id}"
+                ${selected.includes(cat.id) ? "checked" : ""}>
+              <span>${escapeHTML(cat.name)}</span>
+            </label>
+          `).join("")}
+        </div>
+        <button type="button" class="btn ghost small" data-action="new-category-from-exercise">
+          + Crear categoría
+        </button>
+      </div>
+
+      <div class="field">
+        <label for="ex-muscle">Grupo muscular (dato descriptivo)</label>
         <select id="ex-muscle" name="muscle">
           ${["Pecho","Espalda","Hombros","Bíceps","Tríceps","Piernas","Glúteos","Abdominales","Cardio","General"].map(m =>
             `<option ${ex.muscle === m ? "selected" : ""}>${m}</option>`).join("")}
         </select>
       </div>
+
       <div class="field">
         <label>Imagen de portada</label>
         <img id="image-preview" class="image-preview" src="${escapeHTML(selectedImage || placeholder)}" alt="Vista previa">
@@ -375,6 +388,40 @@ async function searchImages() {
 
 // ---------- PLANES ----------
 
+function renderPlans() {
+  const cards = state.plans.map(plan => {
+    const names = plan.items.map(item => {
+      const ex = state.exercises.find(e => e.id === item.exerciseId);
+      return `<span>• ${escapeHTML(ex?.name || item.name || "Ejercicio eliminado")} — ${item.sets} × ${item.reps}</span>`;
+    }).join("");
+
+    return `<article class="card plan-card">
+      <div class="card-title-row">
+        <h3>${escapeHTML(plan.name)}</h3>
+        <span class="pill">${plan.items.length} ejercicios</span>
+      </div>
+      <div class="plan-exercises">${names || "Sin ejercicios todavía"}</div>
+      <div class="card-actions">
+        <button class="btn ghost small" data-action="edit-plan" data-id="${plan.id}">Editar</button>
+        <button class="btn ghost small" data-action="start-plan" data-id="${plan.id}">Entrenar</button>
+        <button class="btn danger small" data-action="delete-plan" data-id="${plan.id}">Eliminar</button>
+      </div>
+    </article>`;
+  }).join("");
+
+  return `
+    <div class="section-head">
+      <div><h2>Mis planes</h2>
+      <p class="muted">Combina tus ejercicios y configura cada rutina.</p></div>
+      <button class="btn" data-action="new-plan">+ Crear plan</button>
+    </div>
+    ${cards ? `<div class="card-grid">${cards}</div>` :
+      emptyState("▤", "Todavía no tienes planes",
+        "Crea un plan y añade ejercicios de tu biblioteca.",
+        `<button class="btn" data-action="new-plan">Crear primer plan</button>`)}
+  `;
+}
+
 function planForm(plan = {}) {
   if (!state.exercises.length) {
     openModal(`<h2>Primero añade ejercicios</h2>
@@ -398,7 +445,7 @@ function planForm(plan = {}) {
       </div>
       <div class="field">
         <span class="field-label">Selecciona los ejercicios</span>
-        <p class="help">Puedes añadir el mismo ejercicio a tantos planes como quieras. Las series, repeticiones y peso se configuran por separado en cada plan.</p>
+        <p class="help">Puedes añadir el mismo ejercicio a tantos planes como quieras. Las series, repeticiones y peso se configuran por separado.</p>
         <div class="exercise-picker">
           ${state.exercises.map(ex => {
             const item = existing.get(ex.id);
@@ -416,7 +463,7 @@ function planForm(plan = {}) {
             </div>`;
           }).join("")}
         </div>
-        <p class="help">En cada ejercicio puedes indicar series, repeticiones y un peso orientativo inicial. Podrás registrar el peso real al entrenar.</p>
+        <p class="help">Podrás registrar el peso real al entrenar.</p>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancelar</button>
@@ -463,204 +510,4 @@ function sessionForm(planId, date) {
         <label>Notas de la sesión (opcional)</label>
         <textarea name="notes" rows="2" placeholder="Sensaciones, observaciones..."></textarea>
       </div>
-      <div class="modal-actions">
-        <button type="button" class="btn ghost" data-action="close-modal">Cancelar</button>
-        <button class="btn" type="submit">Guardar sesión</button>
-      </div>
-    </form>
-  `);
-}
-
-function viewSession(id) {
-  const session = state.sessions.find(s => s.id === id);
-  if (!session) return;
-
-  openModal(`
-    <h2>${escapeHTML(session.planName)}</h2>
-    <p class="muted">${formatDate(session.date)}</p>
-    ${session.exercises.map(ex => `
-      <div class="session-row">
-        <strong>${escapeHTML(ex.name)}</strong>
-        <p class="muted">${ex.sets} series × ${escapeHTML(ex.reps)} repeticiones
-        · ${ex.weight ? `${escapeHTML(ex.weight)} kg` : "Sin peso registrado"}</p>
-      </div>`).join("")}
-    ${session.notes ? `<p class="muted" style="margin-top:14px">Notas: ${escapeHTML(session.notes)}</p>` : ""}
-    <div class="modal-actions">
-      <button class="btn ghost" data-action="close-modal">Cerrar</button>
-      <button class="btn danger" data-action="delete-session" data-id="${session.id}">Eliminar sesión</button>
-    </div>
-  `);
-}
-
-// ---------- EVENTOS ----------
-
-$("#app-content").addEventListener("click", event => {
-  const button = event.target.closest("[data-action]");
-  if (!button) return;
-
-  const { action, id, date } = button.dataset;
-
-  switch (action) {
-    case "new-exercise": exerciseForm(); break;
-    case "edit-exercise": {
-      const ex = state.exercises.find(x => x.id === id);
-      if (ex) exerciseForm(ex);
-      break;
-    }
-    case "delete-exercise": {
-      const used = state.plans.some(p => p.items.some(i => i.exerciseId === id));
-      if (used) return notify("Este ejercicio está incluido en un plan. Elimínalo primero de los planes.");
-      if (confirm("¿Eliminar este ejercicio de tu biblioteca?")) {
-        state.exercises = state.exercises.filter(x => x.id !== id);
-        saveState(); render(); notify("Ejercicio eliminado.");
-      }
-      break;
-    }
-    case "new-plan": planForm(); break;
-    case "edit-plan": {
-      const plan = state.plans.find(x => x.id === id);
-      if (plan) planForm(plan);
-      break;
-    }
-    case "delete-plan":
-      if (confirm("¿Eliminar este plan? Las sesiones ya registradas se conservarán.")) {
-        state.plans = state.plans.filter(x => x.id !== id);
-        saveState(); render(); notify("Plan eliminado.");
-      }
-      break;
-    case "start-plan": sessionForm(id, today()); break;
-    case "calendar-day": openDay(date); break;
-    case "prev-month":
-      calendarDate.setMonth(calendarDate.getMonth() - 1); render(); break;
-    case "next-month":
-      calendarDate.setMonth(calendarDate.getMonth() + 1); render(); break;
-    case "calendar-today":
-      calendarDate = new Date(); render(); break;
-    case "view-session": viewSession(id); break;
-    case "delete-session":
-      if (confirm("¿Eliminar esta sesión del historial?")) {
-        state.sessions = state.sessions.filter(s => s.id !== id);
-        saveState(); closeModal(); render(); notify("Sesión eliminada.");
-      }
-      break;
-    case "close-modal": closeModal(); break;
-    case "go-exercises": closeModal(); setView("exercises"); break;
-  }
-});
-
-function openDay(date) {
-  if (!state.plans.length) {
-    openModal(`<h2>Primero crea un plan</h2>
-      <p class="muted">Necesitas tener al menos un plan para registrar una sesión en el calendario.</p>
-      <div class="modal-actions">
-        <button class="btn ghost" data-action="close-modal">Cerrar</button>
-        <button class="btn" data-action="go-plans">Crear plan</button>
-      </div>`);
-    return;
-  }
-
-  openModal(`
-    <h2>Entrenar el ${formatDate(date)}</h2>
-    <p class="muted">Elige el plan que has realizado.</p>
-    <div class="field">
-      <label for="choose-plan">Plan de entrenamiento</label>
-      <select id="choose-plan">
-        ${state.plans.map(p => `<option value="${p.id}">${escapeHTML(p.name)}</option>`).join("")}
-      </select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn ghost" data-action="close-modal">Cancelar</button>
-      <button class="btn" id="confirm-plan" data-date="${date}">Continuar</button>
-    </div>
-  `);
-
-  $("#confirm-plan").addEventListener("click", () => {
-    const planId = $("#choose-plan").value;
-    sessionForm(planId, date);
-  });
-}
-
-$("#modal-content").addEventListener("click", event => {
-  const button = event.target.closest('[data-action="go-plans"]');
-  if (button) { closeModal(); setView("plans"); }
-});
-
-$("#modal-content").addEventListener("submit", event => {
-  event.preventDefault();
-  const form = event.target;
-
-  if (form.id === "exercise-form") {
-    const data = new FormData(form);
-    const name = String(data.get("name") || "").trim();
-    if (!name) return;
-
-    const existing = state.exercises.find(x => x.id === form.dataset.id);
-    const exercise = {
-      id: existing?.id || uid(),
-      name,
-      muscle: String(data.get("muscle") || "General"),
-      image: selectedImage || ""
-    };
-
-    if (existing) Object.assign(existing, exercise);
-    else state.exercises.push(exercise);
-
-    saveState(); closeModal(); render(); notify("Ejercicio guardado.");
-  }
-
-  if (form.id === "plan-form") {
-    const data = new FormData(form);
-    const name = String(data.get("name") || "").trim();
-    if (!name) return;
-
-    const items = [...form.querySelectorAll('input[name="exercise"]:checked')].map(input => {
-      const exercise = state.exercises.find(x => x.id === input.value);
-      return {
-        exerciseId: input.value,
-        name: exercise?.name || "Ejercicio",
-        sets: Math.max(1, Number(data.get(`sets-${input.value}`)) || 3),
-        reps: String(data.get(`reps-${input.value}`) || "10"),
-        weight: String(data.get(`weight-${input.value}`) || "")
-      };
-    });
-
-    const existing = state.plans.find(x => x.id === form.dataset.id);
-    const plan = { id: existing?.id || uid(), name, items };
-
-    if (existing) Object.assign(existing, plan);
-    else state.plans.push(plan);
-
-    saveState(); closeModal(); render(); notify("Plan guardado.");
-  }
-
-  if (form.id === "session-form") {
-    const plan = state.plans.find(p => p.id === form.dataset.plan);
-    if (!plan) return notify("No se encuentra el plan.");
-
-    const data = new FormData(form);
-    const exercises = plan.items.map(item => {
-      const exercise = state.exercises.find(x => x.id === item.exerciseId);
-      return {
-        exerciseId: item.exerciseId,
-        name: exercise?.name || item.name || "Ejercicio",
-        image: exercise?.image || "",
-        sets: Math.max(0, Number(data.get(`sets-${item.exerciseId}`)) || 0),
-        reps: String(data.get(`reps-${item.exerciseId}`) || ""),
-        weight: String(data.get(`weight-${item.exerciseId}`) || "")
-      };
-    });
-
-    state.sessions.push({
-      id: uid(),
-      date: form.dataset.date,
-      planId: plan.id,
-      planName: plan.name,
-      exercises,
-      notes: String(data.get("notes") || "")
-    });
-
-    saveState(); closeModal(); setView("calendar"); notify("Sesión guardada en tu historial.");
-  }
-});
-
-render();
+      <div class="modal
