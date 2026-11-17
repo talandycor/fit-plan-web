@@ -1,144 +1,58 @@
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f7f7f4">
-  <title>Fit Plan</title>
+  <meta name="theme-color" content="#111827">
+  <title>FitPlan | Mi entrenamiento</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="#"><span class="brand-mark">F</span> Fit Plan</a>
-  <span id="saveStatus">Guardado en este dispositivo</span>
-</header>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="FitPlan inicio">
+        <span class="brand-mark">F</span>
+        <span>fit<span class="brand-light">plan</span></span>
+      </a>
+      <span class="private-label"><span></span> Mi espacio</span>
+    </header>
 
-<main class="container">
-  <section class="intro">
-    <p class="eyebrow">TU ESPACIO DE ENTRENAMIENTO</p>
-    <h1>Entrena con intención.</h1>
-    <p>Prepara tus rutinas una sola vez y registra cada sesión cuando la completes.</p>
-  </section>
-
-  <nav class="tabs">
-    <button class="tab active" data-tab="templates">Mis entrenamientos</button>
-    <button class="tab" data-tab="calendar">Calendario e historial</button>
-  </nav>
-
-  <section id="templatesPanel">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">PLANTILLAS</p>
-        <h2>Mis entrenamientos</h2>
-        <p>Crea cada rutina una sola vez. No lleva fecha.</p>
-      </div>
-      <button class="primary" id="newTemplate">＋ Crear plantilla</button>
-    </div>
-
-    <div class="stats">
-      <article class="stat-card"><span>Plantillas</span><strong id="templateCount">0</strong></article>
-      <article class="stat-card"><span>Ejercicios</span><strong id="exerciseCount">0</strong></article>
-      <article class="stat-card"><span>Sesiones realizadas</span><strong id="sessionCount">0</strong></article>
-    </div>
-
-    <div id="templateList" class="template-list"></div>
-
-    <div id="templateEmpty" class="empty-state">
-      <h3>Aún no tienes plantillas</h3>
-      <p>Crea tu primera rutina para reutilizarla cada vez que entrenes.</p>
-      <button class="secondary" id="emptyNew">Crear mi primera plantilla</button>
-    </div>
-  </section>
-
-  <section id="calendarPanel" hidden>
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">REGISTRO DE ACTIVIDAD</p>
-        <h2>Calendario e historial</h2>
-        <p>Selecciona un día para registrar una sesión realizada.</p>
-      </div>
-    </div>
-
-    <div class="calendar-layout">
-      <div class="calendar-card">
-        <div class="month-head">
-          <button class="icon-button" id="prevMonth">‹</button>
-          <h3 id="monthTitle"></h3>
-          <button class="icon-button" id="nextMonth">›</button>
+    <main>
+      <section class="welcome">
+        <div>
+          <p class="eyebrow">TU ESPACIO DE ENTRENAMIENTO</p>
+          <h1>Entrena a tu manera.</h1>
+          <p class="muted">Organiza tus ejercicios, crea tus planes y sigue tu evolución.</p>
         </div>
-        <div class="calendar-grid" id="calendarGrid"></div>
-        <p class="legend">● Día con entrenamiento</p>
-      </div>
+      </section>
 
-      <aside class="day-card">
-        <p class="eyebrow">DÍA SELECCIONADO</p>
-        <h3 id="selectedDateLabel"></h3>
-        <div id="daySessions"></div>
-        <button class="primary full" id="addSession">＋ Registrar entrenamiento</button>
-      </aside>
+      <nav class="tabs" aria-label="Secciones">
+        <button class="tab active" data-view="exercises">Ejercicios</button>
+        <button class="tab" data-view="plans">Mis planes</button>
+        <button class="tab" data-view="calendar">Calendario</button>
+        <button class="tab" data-view="progress">Progreso</button>
+      </nav>
+
+      <section id="app-content" aria-live="polite"></section>
+    </main>
+
+    <footer>
+      <span>FITPLAN</span>
+      <span>Tu entrenamiento, organizado.</span>
+    </footer>
+  </div>
+
+  <dialog id="modal" class="modal">
+    <div class="modal-inner">
+      <button class="modal-close" id="modal-close" aria-label="Cerrar">×</button>
+      <div id="modal-content"></div>
     </div>
+  </dialog>
 
-    <div class="history">
-      <p class="eyebrow">TUS SESIONES</p>
-      <h2>Historial</h2>
-      <div id="historyList"></div>
-    </div>
-  </section>
-
-  <section class="note">
-    <strong>Guardado local provisional</strong>
-    <p>Los datos se guardan en este navegador. Más adelante conectaremos la sincronización privada con GitHub.</p>
-  </section>
-</main>
-
-<dialog id="templateDialog">
-  <form id="templateForm">
-    <div class="dialog-head">
-      <h2 id="templateDialogTitle">Nueva plantilla</h2>
-      <button type="button" class="icon-button" data-close="templateDialog">×</button>
-    </div>
-
-    <label class="field">
-      Nombre del entrenamiento
-      <input id="templateName" required maxlength="70" placeholder="Ej. Día A · Pecho y tríceps">
-    </label>
-
-    <div class="exercise-head">
-      <strong>Ejercicios</strong>
-      <button type="button" class="secondary" id="addExercise">＋ Añadir ejercicio</button>
-    </div>
-
-    <div id="exerciseEditor"></div>
-
-    <div class="dialog-actions">
-      <button type="button" class="secondary" data-close="templateDialog">Cancelar</button>
-      <button class="primary" type="submit">Guardar plantilla</button>
-    </div>
-  </form>
-</dialog>
-
-<dialog id="sessionDialog">
-  <form id="sessionForm">
-    <div class="dialog-head">
-      <h2>¿Qué has entrenado?</h2>
-      <button type="button" class="icon-button" data-close="sessionDialog">×</button>
-    </div>
-
-    <p id="sessionDateLabel"></p>
-
-    <label class="field">
-      Elige una plantilla
-      <select id="sessionTemplate" required></select>
-    </label>
-
-    <div class="dialog-actions">
-      <button type="button" class="secondary" data-close="sessionDialog">Cancelar</button>
-      <button class="primary" type="submit">Registrar sesión</button>
-    </div>
-  </form>
-</dialog>
-
-<script src="app.js"></script>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="app.js"></script>
 </body>
 </html>
