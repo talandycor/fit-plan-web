@@ -1,4 +1,3 @@
-
 const STORAGE_KEY = "fitplan-library-v1";
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -48,21 +47,32 @@ function loadState() {
         ? saved.categories
         : DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }));
 
-      // Migración segura: los ejercicios antiguos quedan sin categoría.
       saved.exercises = saved.exercises.map(ex => ({
         ...ex,
-        categories: Array.isArray(ex.categories) ? ex.categories : []
+        categories: Array.isArray(ex.categories) ? ex.categories : [],
+        muscles: Array.isArray(ex.muscles)
+          ? ex.muscles
+          : (ex.muscle ? [ex.muscle] : [])
       }));
 
       return saved;
     }
   } catch (e) {}
+
   return {
     exercises: [],
     plans: [],
     sessions: [],
     categories: DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }))
   };
+}
+
+function maxRecordedWeight(exerciseId) {
+  return Math.max(0, ...state.sessions.flatMap(session =>
+    (session.exercises || [])
+      .filter(ex => ex.exerciseId === exerciseId)
+      .map(ex => Number(ex.weight) || 0)
+  ));
 }
 
 function saveState() {
@@ -167,6 +177,10 @@ function renderExercises() {
           }).join("")}
           ${!ex.categories?.length ? `<span class="pill">Sin categoría</span>` : ""}
         </div>
+        <div class="exercise-categories muscle-tags">
+          ${(ex.muscles || (ex.muscle ? [ex.muscle] : [])).map(m =>
+            `<span class="pill">${escapeHTML(m)}</span>`).join("")}
+        </div>
         <div class="card-actions">
           <button class="btn ghost small" data-action="edit-exercise" data-id="${ex.id}">Editar</button>
           <button class="btn ghost small" data-action="delete-exercise" data-id="${ex.id}">Eliminar</button>
@@ -223,6 +237,8 @@ function renderExercises() {
   `;
 }
 
+// ---------- CATEGORÍAS ----------
+
 function categoryForm(category = {}) {
   openModal(`
     <h2>${category.id ? "Editar categoría" : "Nueva categoría"}</h2>
@@ -267,6 +283,9 @@ function manageCategories() {
 function exerciseForm(ex = {}) {
   selectedImage = ex.image || "";
   const selected = ex.categories || [];
+  const selectedMuscles = Array.isArray(ex.muscles)
+    ? ex.muscles
+    : (ex.muscle ? [ex.muscle] : []);
 
   openModal(`
     <h2>${ex.id ? "Editar ejercicio" : "Nuevo ejercicio"}</h2>
@@ -296,11 +315,17 @@ function exerciseForm(ex = {}) {
       </div>
 
       <div class="field">
-        <label for="ex-muscle">Grupo muscular (dato descriptivo)</label>
-        <select id="ex-muscle" name="muscle">
-          ${["Pecho","Espalda","Hombros","Bíceps","Tríceps","Piernas","Glúteos","Abdominales","Cardio","General"].map(m =>
-            `<option ${ex.muscle === m ? "selected" : ""}>${m}</option>`).join("")}
-        </select>
+        <span class="field-label">Grupos musculares</span>
+        <p class="help">Puedes seleccionar más de un grupo muscular. Esto es independiente de las categorías o carpetas.</p>
+        <div class="category-checkboxes muscle-checkboxes">
+          ${["Pecho","Espalda","Hombros","Bíceps","Tríceps","Piernas","Glúteos","Abdominales","Cardio","General"].map(m => `
+            <label class="category-check">
+              <input type="checkbox" name="muscles" value="${m}"
+                ${selectedMuscles.includes(m) ? "checked" : ""}>
+              <span>${m}</span>
+            </label>
+          `).join("")}
+        </div>
       </div>
 
       <div class="field">
@@ -392,7 +417,12 @@ function renderPlans() {
   const cards = state.plans.map(plan => {
     const names = plan.items.map(item => {
       const ex = state.exercises.find(e => e.id === item.exerciseId);
-      return `<span>• ${escapeHTML(ex?.name || item.name || "Ejercicio eliminado")} — ${item.sets} × ${item.reps}</span>`;
+      return `<div class="plan-exercise-row">
+        <img src="${escapeHTML(ex?.image || placeholder)}" alt="">
+        <span>${escapeHTML(ex?.name || item.name || "Ejercicio eliminado")}
+          <small>${item.sets} × ${escapeHTML(item.reps)} · ${item.weight ? `${escapeHTML(item.weight)} kg` : "Peso por definir"}</small>
+        </span>
+      </div>`;
     }).join("");
 
     return `<article class="card plan-card">
@@ -434,6 +464,10 @@ function planForm(plan = {}) {
   }
 
   const existing = new Map((plan.items || []).map(i => [i.exerciseId, i]));
+  const orderedExercises = [
+    ...(plan.items || []).map(item => state.exercises.find(ex => ex.id === item.exerciseId)).filter(Boolean),
+    ...state.exercises.filter(ex => !(plan.items || []).some(item => item.exerciseId === ex.id))
+  ];
 
   openModal(`
     <h2>${plan.id ? "Editar plan" : "Crear plan"}</h2>
@@ -444,12 +478,14 @@ function planForm(plan = {}) {
           value="${escapeHTML(plan.name || "")}" placeholder="Ej. Día A · Pecho y tríceps">
       </div>
       <div class="field">
-        <span class="field-label">Selecciona los ejercicios</span>
-        <p class="help">Puedes añadir el mismo ejercicio a tantos planes como quieras. Las series, repeticiones y peso se configuran por separado.</p>
-        <div class="exercise-picker">
-          ${state.exercises.map(ex => {
+        <span class="field-label">Selecciona y ordena los ejercicios</span>
+        <p class="help">Marca los ejercicios que quieras incluir. Usa las flechas para cambiar su orden. La imagen es la que guardaste en Ejercicios.</p>
+        <div class="exercise-picker" id="plan-exercise-picker">
+          ${orderedExercises.map(ex => {
             const item = existing.get(ex.id);
-            return `<div class="picker-row">
+            const maxWeight = maxRecordedWeight(ex.id);
+            const suggestedWeight = maxWeight ? String(maxWeight) : (item?.weight || "");
+            return `<div class="picker-row" data-exercise-row="${ex.id}">
               <input type="checkbox" name="exercise" value="${ex.id}" ${item ? "checked" : ""}>
               <img src="${escapeHTML(ex.image || placeholder)}" alt="">
               <div>
@@ -457,13 +493,18 @@ function planForm(plan = {}) {
                 <div class="picker-config">
                   <input type="number" min="1" max="30" name="sets-${ex.id}" value="${item?.sets ?? 3}" placeholder="Series" aria-label="Series">
                   <input type="text" name="reps-${ex.id}" value="${escapeHTML(item?.reps ?? "10")}" placeholder="Reps" aria-label="Repeticiones">
-                  <input type="number" min="0" step="0.5" name="weight-${ex.id}" value="${escapeHTML(item?.weight ?? "")}" placeholder="Kg" aria-label="Peso en kg">
+                  <input type="number" min="0" step="0.5" name="weight-${ex.id}" value="${escapeHTML(suggestedWeight)}" placeholder="${maxWeight ? `Máx. ${maxWeight} kg` : "Kg"}" aria-label="Peso en kg">
+                </div>
+                <div class="picker-order">
+                  <button type="button" class="btn ghost small" data-move="up" aria-label="Subir ${escapeHTML(ex.name)}">↑</button>
+                  <button type="button" class="btn ghost small" data-move="down" aria-label="Bajar ${escapeHTML(ex.name)}">↓</button>
+                  <small>${maxWeight ? `Máximo registrado: ${maxWeight} kg` : "Sin pesos registrados todavía"}</small>
                 </div>
               </div>
             </div>`;
           }).join("")}
         </div>
-        <p class="help">Podrás registrar el peso real al entrenar.</p>
+        <p class="help">El peso sugerido se obtiene del máximo registrado para ese ejercicio en tus sesiones. Puedes cambiarlo para este plan.</p>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancelar</button>
@@ -471,41 +512,83 @@ function planForm(plan = {}) {
       </div>
     </form>
   `);
+
+  $$("#plan-exercise-picker [data-move]").forEach(button => {
+    button.addEventListener("click", () => {
+      const row = button.closest(".picker-row");
+      if (!row) return;
+      if (button.dataset.move === "up" && row.previousElementSibling) {
+        row.parentElement.insertBefore(row, row.previousElementSibling);
+      } else if (button.dataset.move === "down" && row.nextElementSibling) {
+        row.parentElement.insertBefore(row.nextElementSibling, row);
+      }
+    });
+  });
 }
 
 // ---------- SESIONES ----------
 
 function sessionForm(planId, date) {
-  const plan = state.plans.find(p => p.id === planId);
-  if (!plan) return notify("No se encuentra ese plan.");
+  const plan = planId ? state.plans.find(p => p.id === planId) : null;
+  if (planId && !plan) return notify("No se encuentra ese plan.");
 
-  const rows = plan.items.map(item => {
-    const ex = state.exercises.find(e => e.id === item.exerciseId);
-    return `<div class="session-row">
-      <strong>${escapeHTML(ex?.name || item.name || "Ejercicio")}</strong>
-      <div class="form-grid" style="margin-top:10px">
-        <div class="field">
-          <label>Series realizadas</label>
-          <input type="number" min="0" name="sets-${item.exerciseId}" value="${item.sets}">
+  let rows = "";
+  if (plan) {
+    rows = plan.items.map(item => {
+      const ex = state.exercises.find(e => e.id === item.exerciseId);
+      return `<div class="session-row session-exercise">
+        <img class="session-exercise-image" src="${escapeHTML(ex?.image || placeholder)}" alt="">
+        <div class="session-exercise-content">
+          <strong>${escapeHTML(ex?.name || item.name || "Ejercicio")}</strong>
+          <div class="form-grid" style="margin-top:10px">
+            <div class="field">
+              <label>Series realizadas</label>
+              <input type="number" min="0" name="sets-${item.exerciseId}" value="${item.sets}">
+            </div>
+            <div class="field">
+              <label>Repeticiones</label>
+              <input name="reps-${item.exerciseId}" value="${escapeHTML(item.reps)}">
+            </div>
+            <div class="field full">
+              <label>Peso utilizado (kg)</label>
+              <input type="number" min="0" step="0.5" name="weight-${item.exerciseId}"
+                value="${escapeHTML(item.weight || (maxRecordedWeight(item.exerciseId) || ""))}" placeholder="Ej. 40">
+            </div>
+          </div>
         </div>
-        <div class="field">
-          <label>Repeticiones</label>
-          <input name="reps-${item.exerciseId}" value="${escapeHTML(item.reps)}">
+      </div>`;
+    }).join("");
+  } else {
+    rows = state.exercises.map(ex => {
+      const maxWeight = maxRecordedWeight(ex.id);
+      return `<div class="picker-row free-exercise-row">
+        <input type="checkbox" name="free-exercise" value="${ex.id}">
+        <img src="${escapeHTML(ex.image || placeholder)}" alt="">
+        <div>
+          <strong>${escapeHTML(ex.name)}</strong>
+          <div class="picker-config">
+            <input type="number" min="0" name="sets-${ex.id}" value="3" placeholder="Series" aria-label="Series">
+            <input name="reps-${ex.id}" value="10" placeholder="Reps" aria-label="Repeticiones">
+            <input type="number" min="0" step="0.5" name="weight-${ex.id}"
+              value="${maxWeight || ""}" placeholder="${maxWeight ? `Máx. ${maxWeight} kg` : "Kg"}" aria-label="Peso en kg">
+          </div>
+          <small class="help">${maxWeight ? `Máximo registrado: ${maxWeight} kg` : "Sin pesos registrados todavía"}</small>
         </div>
-        <div class="field full">
-          <label>Peso utilizado (kg)</label>
-          <input type="number" min="0" step="0.5" name="weight-${item.exerciseId}"
-            value="${escapeHTML(item.weight || "")}" placeholder="Ej. 40">
-        </div>
-      </div>
-    </div>`;
-  }).join("");
+      </div>`;
+    }).join("");
+  }
 
   openModal(`
-    <h2>Registrar entrenamiento</h2>
-    <p class="muted">${escapeHTML(plan.name)} · ${formatDate(date)}</p>
-    <form id="session-form" data-plan="${plan.id}" data-date="${date}">
-      ${rows}
+    <h2>${plan ? "Registrar entrenamiento" : "Entrenamiento libre"}</h2>
+    <p class="muted">${plan ? `${escapeHTML(plan.name)} · ` : ""}${formatDate(date)}</p>
+    <form id="session-form" data-plan="${plan?.id || ""}" data-date="${date}" data-free="${plan ? "false" : "true"}">
+      ${plan
+        ? rows
+        : `<div class="field">
+            <span class="field-label">Elige los ejercicios que has realizado</span>
+            <p class="help">Puedes seleccionar tantos ejercicios como quieras. Se mostrarán sus imágenes de la biblioteca.</p>
+            <div class="exercise-picker">${rows || `<p class="muted">Todavía no tienes ejercicios. Añádelos primero en Ejercicios.</p>`}</div>
+          </div>`}
       <div class="field">
         <label>Notas de la sesión (opcional)</label>
         <textarea name="notes" rows="2" placeholder="Sensaciones, observaciones..."></textarea>
@@ -526,10 +609,13 @@ function viewSession(id) {
     <h2>${escapeHTML(session.planName)}</h2>
     <p class="muted">${formatDate(session.date)}</p>
     ${session.exercises.map(ex => `
-      <div class="session-row">
+      <div class="session-row session-exercise">
+        <img class="session-exercise-image" src="${escapeHTML(ex.image || placeholder)}" alt="">
+        <div class="session-exercise-content">
         <strong>${escapeHTML(ex.name)}</strong>
         <p class="muted">${ex.sets} series × ${escapeHTML(ex.reps)} repeticiones
         · ${ex.weight ? `${escapeHTML(ex.weight)} kg` : "Sin peso registrado"}</p>
+        </div>
       </div>`).join("")}
     ${session.notes ? `<p class="muted" style="margin-top:14px">Notas: ${escapeHTML(session.notes)}</p>` : ""}
     <div class="modal-actions">
@@ -734,6 +820,7 @@ function handleAction(action, id, date) {
       break;
     case "start-plan": sessionForm(id, today()); break;
     case "calendar-day": openDay(date); break;
+    case "free-workout": sessionForm("", date); break;
     case "prev-month":
       calendarDate.setMonth(calendarDate.getMonth() - 1); render(); break;
     case "next-month":
@@ -756,35 +843,39 @@ function handleAction(action, id, date) {
 // ---------- CALENDARIO: SELECCIÓN DE PLAN ----------
 
 function openDay(date) {
-  if (!state.plans.length) {
-    openModal(`<h2>Primero crea un plan</h2>
-      <p class="muted">Necesitas tener al menos un plan para registrar una sesión en el calendario.</p>
-      <div class="modal-actions">
-        <button class="btn ghost" data-action="close-modal">Cerrar</button>
-        <button class="btn" data-action="go-plans">Crear plan</button>
-      </div>`);
-    return;
-  }
-
   openModal(`
     <h2>Entrenar el ${formatDate(date)}</h2>
-    <p class="muted">Elige el plan que has realizado.</p>
-    <div class="field">
-      <label for="choose-plan">Plan de entrenamiento</label>
-      <select id="choose-plan">
-        ${state.plans.map(p => `<option value="${p.id}">${escapeHTML(p.name)}</option>`).join("")}
-      </select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn ghost" data-action="close-modal">Cancelar</button>
-      <button class="btn" id="confirm-plan" data-date="${date}">Continuar</button>
-    </div>
+    <p class="muted">Elige un plan o registra un entrenamiento libre.</p>
+    ${state.plans.length ? `
+      <div class="field">
+        <label for="choose-plan">Plan de entrenamiento</label>
+        <select id="choose-plan">
+          ${state.plans.map(p => `<option value="${p.id}">${escapeHTML(p.name)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" data-action="close-modal">Cancelar</button>
+        <button class="btn" id="confirm-plan" data-date="${date}">Entrenar con este plan</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn secondary" data-action="free-workout" data-date="${date}">＋ Entrenamiento libre</button>
+      </div>
+    ` : `
+      <p class="muted">Todavía no tienes planes. Puedes empezar igualmente con los ejercicios de tu biblioteca.</p>
+      <div class="modal-actions">
+        <button class="btn ghost" data-action="close-modal">Cancelar</button>
+        <button class="btn" data-action="free-workout" data-date="${date}">＋ Empezar entrenamiento libre</button>
+      </div>
+    `}
   `);
 
-  $("#confirm-plan").addEventListener("click", () => {
-    const planId = $("#choose-plan").value;
-    sessionForm(planId, date);
-  });
+  const confirmButton = $("#confirm-plan");
+  if (confirmButton) {
+    confirmButton.addEventListener("click", () => {
+      const planId = $("#choose-plan").value;
+      sessionForm(planId, date);
+    });
+  }
 }
 
 // ---------- GUARDADO DE FORMULARIOS ----------
@@ -810,7 +901,6 @@ $("#modal-content").addEventListener("submit", event => {
 
     saveState();
 
-    // Si se creó desde el formulario de ejercicio, vuelve a él.
     if (form.dataset.returnToExercise === "true") {
       closeModal();
       exerciseForm();
@@ -826,10 +916,13 @@ $("#modal-content").addEventListener("submit", event => {
     if (!name) return;
 
     const existing = state.exercises.find(x => x.id === form.dataset.id);
+    const muscles = data.getAll("muscles").map(String);
+
     const exercise = {
       id: existing?.id || uid(),
       name,
-      muscle: String(data.get("muscle") || "General"),
+      muscles,
+      muscle: muscles[0] || "General",
       categories: data.getAll("categories").map(String),
       image: selectedImage || ""
     };
@@ -866,25 +959,34 @@ $("#modal-content").addEventListener("submit", event => {
 
   if (form.id === "session-form") {
     const plan = state.plans.find(p => p.id === form.dataset.plan);
-    if (!plan) return notify("No se encuentra el plan.");
+    const isFree = form.dataset.free === "true";
 
-    const exercises = plan.items.map(item => {
-      const exercise = state.exercises.find(x => x.id === item.exerciseId);
+    if (!isFree && !plan) return notify("No se encuentra el plan.");
+
+    const selectedIds = isFree
+      ? [...form.querySelectorAll('input[name="free-exercise"]:checked')].map(input => input.value)
+      : plan.items.map(item => item.exerciseId);
+
+    if (!selectedIds.length) return notify("Selecciona al menos un ejercicio para guardar la sesión.");
+
+    const exercises = selectedIds.map(exerciseId => {
+      const item = plan?.items.find(i => i.exerciseId === exerciseId);
+      const exercise = state.exercises.find(x => x.id === exerciseId);
       return {
-        exerciseId: item.exerciseId,
-        name: exercise?.name || item.name || "Ejercicio",
+        exerciseId,
+        name: exercise?.name || item?.name || "Ejercicio",
         image: exercise?.image || "",
-        sets: Math.max(0, Number(data.get(`sets-${item.exerciseId}`)) || 0),
-        reps: String(data.get(`reps-${item.exerciseId}`) || ""),
-        weight: String(data.get(`weight-${item.exerciseId}`) || "")
+        sets: Math.max(0, Number(data.get(`sets-${exerciseId}`)) || 0),
+        reps: String(data.get(`reps-${exerciseId}`) || ""),
+        weight: String(data.get(`weight-${exerciseId}`) || "")
       };
     });
 
     state.sessions.push({
       id: uid(),
       date: form.dataset.date,
-      planId: plan.id,
-      planName: plan.name,
+      planId: plan?.id || null,
+      planName: plan?.name || "Entrenamiento libre",
       exercises,
       notes: String(data.get("notes") || "")
     });
