@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f7f4">
+  <title>Fit Plan</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#"><span class="brand-mark">F</span> Fit Plan</a>
+    <span class="status" id="saveStatus">Guardado en este dispositivo</span>
+  </header>
+
+  <main class="container">
+    <section class="intro">
+      <div>
+        <p class="eyebrow">TU ESPACIO DE ENTRENAMIENTO</p>
+        <h1>Entrena con intención.</h1>
+        <p class="subheading">Organiza tus sesiones, registra tus progresos y mantén tu plan a mano.</p>
+      </div>
+      <button class="primary" id="newDayBtn">＋ Nuevo entrenamiento</button>
+    </section>
+
+    <section class="stats">
+      <article class="stat-card"><span>Entrenamientos</span><strong id="totalDays">0</strong></article>
+      <article class="stat-card"><span>Ejercicios registrados</span><strong id="totalExercises">0</strong></article>
+      <article class="stat-card"><span>Sesiones completadas</span><strong id="completedDays">0</strong></article>
+    </section>
+
+    <section class="workspace">
+      <div class="section-heading">
+        <div><p class="eyebrow">TU PLAN</p><h2>Entrenamientos</h2></div>
+        <label class="search"><span>⌕</span><input id="searchInput" type="search" placeholder="Buscar entrenamiento"></label>
+      </div>
+      <div id="workoutList" class="workout-list"></div>
+      <div id="emptyState" class="empty-state">
+        <div class="empty-icon">＋</div>
+        <h3>Tu plan empieza aquí</h3>
+        <p>Crea tu primer entrenamiento y añade los ejercicios que quieras.</p>
+        <button class="secondary" id="emptyNewBtn">Crear entrenamiento</button>
+      </div>
+    </section>
+
+    <section class="note">
+      <strong>Sincronización pendiente</strong>
+      <p>Esta primera versión guarda los cambios en este navegador. En el siguiente paso conectaremos el acceso privado con GitHub y la sincronización en la nube.</p>
+    </section>
+  </main>
+
+  <dialog id="workoutDialog">
+    <form id="workoutForm" method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">NUEVA SESIÓN</p><h2 id="dialogTitle">Crear entrenamiento</h2></div><button class="icon-button" type="button" id="closeDialog" aria-label="Cerrar">×</button></div>
+      <label class="field">Nombre del entrenamiento<input id="workoutName" required maxlength="70" placeholder="Ej. Tren superior"></label>
+      <label class="field">Fecha<input id="workoutDate" type="date" required></label>
+      <label class="checkline"><input id="workoutDone" type="checkbox"> Ya he realizado este entrenamiento</label>
+      <div class="dialog-actions"><button type="button" class="secondary" id="cancelDialog">Cancelar</button><button class="primary" type="submit">Guardar</button></div>
+    </form>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>
