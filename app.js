@@ -510,4 +510,389 @@ function sessionForm(planId, date) {
         <label>Notas de la sesión (opcional)</label>
         <textarea name="notes" rows="2" placeholder="Sensaciones, observaciones..."></textarea>
       </div>
-      <div class="modal
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" data-action="close-modal">Cancelar</button>
+        <button class="btn" type="submit">Guardar sesión</button>
+      </div>
+    </form>
+  `);
+}
+
+function viewSession(id) {
+  const session = state.sessions.find(s => s.id === id);
+  if (!session) return;
+
+  openModal(`
+    <h2>${escapeHTML(session.planName)}</h2>
+    <p class="muted">${formatDate(session.date)}</p>
+    ${session.exercises.map(ex => `
+      <div class="session-row">
+        <strong>${escapeHTML(ex.name)}</strong>
+        <p class="muted">${ex.sets} series × ${escapeHTML(ex.reps)} repeticiones
+        · ${ex.weight ? `${escapeHTML(ex.weight)} kg` : "Sin peso registrado"}</p>
+      </div>`).join("")}
+    ${session.notes ? `<p class="muted" style="margin-top:14px">Notas: ${escapeHTML(session.notes)}</p>` : ""}
+    <div class="modal-actions">
+      <button class="btn ghost" data-action="close-modal">Cerrar</button>
+      <button class="btn danger" data-action="delete-session" data-id="${session.id}">Eliminar sesión</button>
+    </div>
+  `);
+}
+
+// ---------- CALENDARIO Y PROGRESO ----------
+
+function monthName(date) {
+  return date.toLocaleDateString("es-ES", { month: "long", year: "numeric" });
+}
+
+function formatDate(date) {
+  return new Date(`${date}T12:00:00`).toLocaleDateString("es-ES", {
+    day: "numeric", month: "long", year: "numeric"
+  });
+}
+
+function renderCalendar() {
+  const year = calendarDate.getFullYear();
+  const month = calendarDate.getMonth();
+  const first = new Date(year, month, 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const start = new Date(year, month, 1 - startOffset);
+  const weekdays = ["L", "M", "X", "J", "V", "S", "D"];
+
+  let days = weekdays.map(d => `<div class="calendar-weekday">${d}</div>`).join("");
+
+  for (let i = 0; i < 42; i++) {
+    const date = new Date(start);
+    date.setDate(start.getDate() + i);
+    const key = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+    const sessions = state.sessions.filter(s => s.date === key);
+    const classes = [
+      "day",
+      date.getMonth() !== month ? "outside" : "",
+      key === today() ? "today" : "",
+      sessions.length ? "has-session" : ""
+    ].filter(Boolean).join(" ");
+
+    days += `<button class="${classes}" data-action="calendar-day" data-date="${key}">
+      <span class="day-number">${date.getDate()}</span>
+      ${sessions.map(s => `<span class="day-event">${escapeHTML(s.planName)}</span>`).join("")}
+    </button>`;
+  }
+
+  const upcoming = [...state.sessions].sort((a,b) => b.date.localeCompare(a.date))
+    .slice(0, 8).map(s => `
+      <div class="session-row">
+        <strong>${escapeHTML(s.planName)}</strong>
+        <p class="muted">${formatDate(s.date)} · ${s.exercises.length} ejercicios</p>
+        <button class="btn ghost small" data-action="view-session" data-id="${s.id}">Ver sesión</button>
+      </div>`).join("");
+
+  return `
+    <div class="section-head">
+      <div><h2>Calendario</h2>
+      <p class="muted">Selecciona un día para registrar tu entrenamiento.</p></div>
+      <button class="btn" data-action="calendar-today">Hoy</button>
+    </div>
+    <div class="card" style="padding:16px">
+      <div class="calendar-head">
+        <button class="btn ghost small" data-action="prev-month">←</button>
+        <h3 style="text-transform:capitalize">${monthName(calendarDate)}</h3>
+        <button class="btn ghost small" data-action="next-month">→</button>
+      </div>
+      <div class="calendar-grid">${days}</div>
+    </div>
+    <div class="session-list">
+      <h2>Últimas sesiones</h2>
+      ${upcoming || `<p class="muted">Todavía no has registrado sesiones.</p>`}
+    </div>
+  `;
+}
+
+function renderProgress() {
+  const sessions = [...state.sessions].sort((a,b) => b.date.localeCompare(a.date));
+  const exerciseCount = new Set(sessions.flatMap(s => s.exercises.map(e => e.exerciseId))).size;
+  const totalExercises = sessions.reduce((sum, s) => sum + s.exercises.length, 0);
+
+  const progress = {};
+  sessions.forEach(session => {
+    session.exercises.forEach(ex => {
+      if (!progress[ex.exerciseId]) progress[ex.exerciseId] = { name: ex.name, records: [] };
+      progress[ex.exerciseId].records.push({
+        date: session.date,
+        weight: Number(ex.weight) || 0,
+        reps: ex.reps,
+        sets: ex.sets
+      });
+    });
+  });
+
+  const rows = Object.values(progress).map(item => {
+    const records = item.records;
+    const best = Math.max(0, ...records.map(r => r.weight));
+    const latest = records[0];
+    return `<div class="progress-item">
+      <strong>${escapeHTML(item.name)}</strong>
+      <p>Último registro: ${latest.weight || "Sin peso"}${latest.weight ? " kg" : ""}
+      · ${latest.sets} series × ${latest.reps} repeticiones</p>
+      <p>Mejor peso registrado: ${best ? `${best} kg` : "Sin datos de peso"} · ${records.length} registros</p>
+    </div>`;
+  }).join("");
+
+  return `
+    <div class="section-head">
+      <div><h2>Tu progreso</h2>
+      <p class="muted">Resumen de tus entrenamientos registrados.</p></div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat"><strong>${sessions.length}</strong><span>Sesiones</span></div>
+      <div class="stat"><strong>${exerciseCount}</strong><span>Ejercicios trabajados</span></div>
+      <div class="stat"><strong>${totalExercises}</strong><span>Registros de ejercicio</span></div>
+    </div>
+    <div class="card" style="padding:18px">
+      <h3>Evolución por ejercicio</h3>
+      ${rows || `<p class="muted">Cuando registres tus primeras sesiones, aquí aparecerá tu evolución.</p>`}
+    </div>
+  `;
+}
+
+// ---------- ACCIONES DE LA INTERFAZ ----------
+
+$("#app-content").addEventListener("click", event => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  handleAction(button.dataset.action, button.dataset.id, button.dataset.date);
+});
+
+$("#modal-content").addEventListener("click", event => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  handleAction(button.dataset.action, button.dataset.id, button.dataset.date);
+});
+
+function handleAction(action, id, date) {
+  switch (action) {
+    case "new-exercise": exerciseForm(); break;
+    case "edit-exercise": {
+      const ex = state.exercises.find(x => x.id === id);
+      if (ex) exerciseForm(ex);
+      break;
+    }
+    case "delete-exercise": {
+      const used = state.plans.some(p => p.items.some(i => i.exerciseId === id));
+      if (used) return notify("Este ejercicio está incluido en un plan. Elimínalo primero de los planes.");
+      if (confirm("¿Eliminar este ejercicio de tu biblioteca?")) {
+        state.exercises = state.exercises.filter(x => x.id !== id);
+        saveState(); render(); notify("Ejercicio eliminado.");
+      }
+      break;
+    }
+    case "open-category":
+      selectedCategory = id;
+      render();
+      break;
+    case "back-folders":
+      selectedCategory = "";
+      render();
+      break;
+    case "new-category":
+      categoryForm();
+      break;
+    case "new-category-from-exercise":
+      categoryForm();
+      break;
+    case "edit-category": {
+      const cat = state.categories.find(c => c.id === id);
+      if (cat) categoryForm(cat);
+      break;
+    }
+    case "manage-categories":
+      manageCategories();
+      break;
+    case "delete-category":
+      if (confirm("¿Eliminar esta categoría? Los ejercicios no se borrarán, solo perderán esta asignación.")) {
+        state.categories = state.categories.filter(c => c.id !== id);
+        state.exercises.forEach(ex => {
+          ex.categories = (ex.categories || []).filter(catId => catId !== id);
+        });
+        if (selectedCategory === id) selectedCategory = "";
+        saveState();
+        manageCategories();
+        notify("Categoría eliminada.");
+      }
+      break;
+    case "new-plan": planForm(); break;
+    case "edit-plan": {
+      const plan = state.plans.find(x => x.id === id);
+      if (plan) planForm(plan);
+      break;
+    }
+    case "delete-plan":
+      if (confirm("¿Eliminar este plan? Las sesiones ya registradas se conservarán.")) {
+        state.plans = state.plans.filter(x => x.id !== id);
+        saveState(); render(); notify("Plan eliminado.");
+      }
+      break;
+    case "start-plan": sessionForm(id, today()); break;
+    case "calendar-day": openDay(date); break;
+    case "prev-month":
+      calendarDate.setMonth(calendarDate.getMonth() - 1); render(); break;
+    case "next-month":
+      calendarDate.setMonth(calendarDate.getMonth() + 1); render(); break;
+    case "calendar-today":
+      calendarDate = new Date(); render(); break;
+    case "view-session": viewSession(id); break;
+    case "delete-session":
+      if (confirm("¿Eliminar esta sesión del historial?")) {
+        state.sessions = state.sessions.filter(s => s.id !== id);
+        saveState(); closeModal(); render(); notify("Sesión eliminada.");
+      }
+      break;
+    case "close-modal": closeModal(); break;
+    case "go-exercises": closeModal(); setView("exercises"); break;
+    case "go-plans": closeModal(); setView("plans"); break;
+  }
+}
+
+// ---------- CALENDARIO: SELECCIÓN DE PLAN ----------
+
+function openDay(date) {
+  if (!state.plans.length) {
+    openModal(`<h2>Primero crea un plan</h2>
+      <p class="muted">Necesitas tener al menos un plan para registrar una sesión en el calendario.</p>
+      <div class="modal-actions">
+        <button class="btn ghost" data-action="close-modal">Cerrar</button>
+        <button class="btn" data-action="go-plans">Crear plan</button>
+      </div>`);
+    return;
+  }
+
+  openModal(`
+    <h2>Entrenar el ${formatDate(date)}</h2>
+    <p class="muted">Elige el plan que has realizado.</p>
+    <div class="field">
+      <label for="choose-plan">Plan de entrenamiento</label>
+      <select id="choose-plan">
+        ${state.plans.map(p => `<option value="${p.id}">${escapeHTML(p.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" data-action="close-modal">Cancelar</button>
+      <button class="btn" id="confirm-plan" data-date="${date}">Continuar</button>
+    </div>
+  `);
+
+  $("#confirm-plan").addEventListener("click", () => {
+    const planId = $("#choose-plan").value;
+    sessionForm(planId, date);
+  });
+}
+
+// ---------- GUARDADO DE FORMULARIOS ----------
+
+$("#modal-content").addEventListener("submit", event => {
+  event.preventDefault();
+  const form = event.target;
+  const data = new FormData(form);
+
+  if (form.id === "category-form") {
+    const name = String(data.get("name") || "").trim();
+    if (!name) return;
+
+    const duplicate = state.categories.some(c =>
+      c.name.toLocaleLowerCase("es") === name.toLocaleLowerCase("es") &&
+      c.id !== form.dataset.id
+    );
+    if (duplicate) return notify("Ya existe una categoría con ese nombre.");
+
+    const existing = state.categories.find(c => c.id === form.dataset.id);
+    if (existing) existing.name = name;
+    else state.categories.push({ id: uid(), name });
+
+    saveState();
+
+    // Si se creó desde el formulario de ejercicio, vuelve a él.
+    if (form.dataset.returnToExercise === "true") {
+      closeModal();
+      exerciseForm();
+    } else {
+      closeModal();
+      if (currentView === "exercises") render();
+      notify("Categoría guardada.");
+    }
+  }
+
+  if (form.id === "exercise-form") {
+    const name = String(data.get("name") || "").trim();
+    if (!name) return;
+
+    const existing = state.exercises.find(x => x.id === form.dataset.id);
+    const exercise = {
+      id: existing?.id || uid(),
+      name,
+      muscle: String(data.get("muscle") || "General"),
+      categories: data.getAll("categories").map(String),
+      image: selectedImage || ""
+    };
+
+    if (existing) Object.assign(existing, exercise);
+    else state.exercises.push(exercise);
+
+    saveState(); closeModal(); render(); notify("Ejercicio guardado.");
+  }
+
+  if (form.id === "plan-form") {
+    const name = String(data.get("name") || "").trim();
+    if (!name) return;
+
+    const items = [...form.querySelectorAll('input[name="exercise"]:checked')].map(input => {
+      const exercise = state.exercises.find(x => x.id === input.value);
+      return {
+        exerciseId: input.value,
+        name: exercise?.name || "Ejercicio",
+        sets: Math.max(1, Number(data.get(`sets-${input.value}`)) || 3),
+        reps: String(data.get(`reps-${input.value}`) || "10"),
+        weight: String(data.get(`weight-${input.value}`) || "")
+      };
+    });
+
+    const existing = state.plans.find(x => x.id === form.dataset.id);
+    const plan = { id: existing?.id || uid(), name, items };
+
+    if (existing) Object.assign(existing, plan);
+    else state.plans.push(plan);
+
+    saveState(); closeModal(); render(); notify("Plan guardado.");
+  }
+
+  if (form.id === "session-form") {
+    const plan = state.plans.find(p => p.id === form.dataset.plan);
+    if (!plan) return notify("No se encuentra el plan.");
+
+    const exercises = plan.items.map(item => {
+      const exercise = state.exercises.find(x => x.id === item.exerciseId);
+      return {
+        exerciseId: item.exerciseId,
+        name: exercise?.name || item.name || "Ejercicio",
+        image: exercise?.image || "",
+        sets: Math.max(0, Number(data.get(`sets-${item.exerciseId}`)) || 0),
+        reps: String(data.get(`reps-${item.exerciseId}`) || ""),
+        weight: String(data.get(`weight-${item.exerciseId}`) || "")
+      };
+    });
+
+    state.sessions.push({
+      id: uid(),
+      date: form.dataset.date,
+      planId: plan.id,
+      planName: plan.name,
+      exercises,
+      notes: String(data.get("notes") || "")
+    });
+
+    saveState(); closeModal(); setView("calendar"); notify("Sesión guardada en tu historial.");
+  }
+});
+
+// ---------- INICIO ----------
+
+render();
