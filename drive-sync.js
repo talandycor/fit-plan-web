@@ -1,61 +1,91 @@
 
-/* AndriFIT · Sincronización segura con Google Drive */
+/* AndriFIT · Sincronización automática con Google Drive */
 
 (() => {
   "use strict";
 
   const CLIENT_ID = "196091840894-q54goht1grsb0900o72d7egb7sm2186s.apps.googleusercontent.com";
-  const DRIVE_FILE_NAME = "andrifit-data.json";
-  const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+  const FILE_NAME = "andrifit-data.json";
+  const SCOPE = "https://www.googleapis.com/auth/drive.appdata";
   const API = "https://www.googleapis.com/drive/v3";
   const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
   const LOCAL_KEY = "fitplan-library-v1";
 
-  let accessToken = null;
-  let driveFileId = null;
-  let knownVersion = null;
-  let syncTimer = null;
-  let syncing = false;
-  let pendingUpload = false;
-  let conflictDetected = false;
-  let originalSaveState = null;
+  const UPLOAD_DELAY = 1200;
+  const POLL_INTERVAL = 8000;
 
-  const statusEl = () => document.getElementById("drive-sync-status");
-  const connectBtn = () => document.getElementById("drive-connect-btn");
-  const syncBtn = () => document.getElementById("drive-sync-btn");
+  let token = null;
+  let fileId = null;
+  let knownVersion = null;
+
+  let syncing = false;
+  let dirty = false;
+  let pending = false;
+  let conflict = false;
+
+  let uploadTimer = null;
+  let pollTimer = null;
+  let originalSave = null;
+
+  const byId = id => document.getElementById(id);
 
   function status(message, kind = "") {
-    const el = statusEl();
+    const el = byId("drive-sync-status");
     if (!el) return;
+
     el.textContent = message;
     el.dataset.status = kind;
   }
 
   function updateButtons() {
-    const connected = Boolean(accessToken);
+    const connected = Boolean(token);
 
-    if (connectBtn()) {
-      connectBtn().textContent = connected
+    const connect = byId("drive-connect-btn");
+    const sync = byId("drive-sync-btn");
+
+    if (connect) {
+      connect.textContent = connected
         ? "Google Drive conectado"
         : "Conectar Google Drive";
-      connectBtn().disabled = connected;
+
+      connect.disabled = connected;
     }
 
-    if (syncBtn()) {
-      syncBtn().disabled = !connected || syncing;
+    if (sync) {
+      sync.disabled = !connected || syncing;
     }
   }
 
-  function waitForGoogleIdentity() {
+  function valid(data) {
+    return data &&
+      Array.isArray(data.exercises) &&
+      Array.isArray(data.plans) &&
+      Array.isArray(data.sessions);
+  }
+
+  function localData() {
+    try {
+      return JSON.parse(localStorage.getItem(LOCAL_KEY) || "null");
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function versionOf(file) {
+    if (!file) return null;
+    return String(file.version || file.modifiedTime || "");
+  }
+
+  function waitForGoogle() {
     return new Promise((resolve, reject) => {
       const started = Date.now();
 
-      const timer = setInterval(() => {
+      const interval = setInterval(() => {
         if (window.google?.accounts?.oauth2) {
-          clearInterval(timer);
+          clearInterval(interval);
           resolve();
-        } else if (Date.now() - started > 12000) {
-          clearInterval(timer);
+        } else if (Date.now() - started > 15000) {
+          clearInterval(interval);
           reject(new Error("No se ha podido cargar Google. Recarga la página."));
         }
       }, 150);
@@ -63,13 +93,13 @@
   }
 
   async function requestToken() {
-    await waitForGoogleIdentity();
+    await waitForGoogle();
 
     return new Promise((resolve, reject) => {
       try {
-        const tokenClient = google.accounts.oauth2.initTokenClient({
+        const client = google.accounts.oauth2.initTokenClient({
           client_id: CLIENT_ID,
-          scope: DRIVE_SCOPE,
+          scope: SCOPE,
 
           callback: response => {
             if (response?.error || !response?.access_token) {
@@ -81,19 +111,18 @@
               return;
             }
 
-            accessToken = response.access_token;
-            resolve(accessToken);
+            token = response.access_token;
+            resolve();
           },
 
           error_callback: error => {
             reject(new Error(
-              error?.message || "No se pudo autorizar Google Drive."
+              error?.message || "Error de autorización de Google."
             ));
           }
         });
 
-        // No fuerza el consentimiento si ya se concedió anteriormente.
-        tokenClient.requestAccessToken({ prompt: "" });
+        client.requestAccessToken({ prompt: "" });
 
       } catch (error) {
         reject(error);
@@ -105,261 +134,339 @@
     const response = await fetch(url, {
       ...options,
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
         ...(options.headers || {})
       }
     });
 
     if (response.status === 401) {
-      accessToken = null;
+      token = null;
+      stopPolling();
       updateButtons();
-      throw new Error("La autorización ha caducado. Vuelve a conectar Google Drive.");
+
+      throw new Error(
+        "La autorización ha caducado. Vuelve a conectar Google Drive."
+      );
     }
 
     if (!response.ok) {
       let detail = "";
 
       try {
-        const body = await response.json();
-        detail = body.error?.message || "";
+        const data = await response.json();
+        detail = data.error?.message || "";
       } catch (_) {}
 
-      throw new Error(detail || `Error de Google Drive (${response.status}).`);
+      throw new Error(
+        detail || `Error de Google Drive (${response.status}).`
+      );
     }
 
     return response;
   }
 
-  function fileVersion(file) {
-    return String(file?.version || file?.modifiedTime || "");
-  }
-
-  async function findDriveFile() {
+  async function findFile() {
     const query = encodeURIComponent(
-      `name='${DRIVE_FILE_NAME}' and trashed=false`
+      `name='${FILE_NAME}' and trashed=false`
     );
 
     const url =
-      `${API}/files?q=${query}&spaces=appDataFolder` +
-      `&fields=files(id,name,version,modifiedTime)&pageSize=10`;
+      `${API}/files?q=${query}` +
+      `&spaces=appDataFolder` +
+      `&fields=files(id,name,version,modifiedTime)` +
+      `&pageSize=10`;
 
     const response = await driveFetch(url);
-    const data = await response.json();
-    const file = data.files?.[0] || null;
+    const result = await response.json();
 
-    driveFileId = file?.id || null;
+    const file = result.files?.[0] || null;
+
+    fileId = file?.id || null;
+
     return file;
   }
 
-  function currentLocalState() {
-    try {
-      return JSON.parse(localStorage.getItem(LOCAL_KEY) || "null");
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function validateState(data) {
-    return data &&
-      Array.isArray(data.exercises) &&
-      Array.isArray(data.plans) &&
-      Array.isArray(data.sessions);
-  }
-
-  async function downloadCloudState() {
-    if (!driveFileId) {
+  async function downloadCloud() {
+    if (!fileId) {
       throw new Error("No se encuentra el archivo de AndriFIT en Drive.");
     }
 
     const response = await driveFetch(
-      `${API}/files/${encodeURIComponent(driveFileId)}?alt=media`
+      `${API}/files/${encodeURIComponent(fileId)}?alt=media`
     );
 
     const data = await response.json();
 
-    if (!validateState(data)) {
+    if (!valid(data)) {
       throw new Error("El archivo de Drive no contiene datos válidos.");
     }
 
     return data;
   }
 
-  async function uploadState(data) {
-    const blob = new Blob(
-      [JSON.stringify(data)],
-      { type: "application/json" }
-    );
+  async function uploadCloud(data) {
+    if (!valid(data)) {
+      throw new Error("No hay datos válidos para guardar.");
+    }
+
+    const boundary = "andrifit_boundary_" + Date.now();
 
     const metadata = {
-      name: DRIVE_FILE_NAME,
+      name: FILE_NAME,
       mimeType: "application/json",
-      ...(driveFileId ? {} : { parents: ["appDataFolder"] })
+      ...(fileId ? {} : { parents: ["appDataFolder"] })
     };
 
-    const endpoint = driveFileId
-      ? `${UPLOAD_API}/files/${encodeURIComponent(driveFileId)}?uploadType=multipart&fields=id`
+    const body = new Blob([
+      `--${boundary}\r\n`,
+      "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+      JSON.stringify(metadata),
+      `\r\n--${boundary}\r\n`,
+      "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+      JSON.stringify(data),
+      `\r\n--${boundary}--`
+    ], {
+      type: `multipart/related; boundary=${boundary}`
+    });
+
+    const endpoint = fileId
+      ? `${UPLOAD_API}/files/${encodeURIComponent(fileId)}?uploadType=multipart&fields=id`
       : `${UPLOAD_API}/files?uploadType=multipart&fields=id`;
 
-    const body = new FormData();
-
-    body.append(
-      "metadata",
-      new Blob([JSON.stringify(metadata)], {
-        type: "application/json"
-      })
-    );
-
-    body.append("file", blob);
-
     const response = await driveFetch(endpoint, {
-      method: driveFileId ? "PATCH" : "POST",
+      method: fileId ? "PATCH" : "POST",
+      headers: {
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
       body
     });
 
-    const saved = await response.json();
+    const result = await response.json();
 
-    if (!saved.id) {
+    if (!result.id) {
       throw new Error("Google Drive no ha confirmado el guardado.");
     }
 
-    driveFileId = saved.id;
+    fileId = result.id;
 
-    const updatedFile = await findDriveFile();
+    const savedFile = await findFile();
 
-    if (!updatedFile) {
+    if (!savedFile) {
       throw new Error("No se ha podido verificar el archivo guardado.");
     }
 
-    knownVersion = fileVersion(updatedFile);
-    conflictDetected = false;
+    knownVersion = versionOf(savedFile);
+    conflict = false;
   }
 
-  async function restoreCloudState() {
-    const cloudState = await downloadCloudState();
+  async function pullFromDrive() {
+    const data = await downloadCloud();
 
-    // Actualiza los datos de la aplicación y su caché local.
-    localStorage.setItem(LOCAL_KEY, JSON.stringify(cloudState));
-    state = cloudState;
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(data));
+    state = data;
 
     if (typeof render === "function") {
       render();
     }
 
-    const file = await findDriveFile();
-    knownVersion = fileVersion(file);
-    conflictDetected = false;
+    const file = await findFile();
+
+    knownVersion = versionOf(file);
+    dirty = false;
+    conflict = false;
+    pending = false;
 
     status("Datos actualizados desde Google Drive", "ok");
   }
 
-  async function uploadLocalState(force = false) {
-    const data = currentLocalState() || state;
+  async function pushToDrive() {
+    if (!token) return;
 
-    if (!validateState(data)) {
-      throw new Error("No hay datos válidos para sincronizar.");
+    const data = localData() || state;
+
+    if (!valid(data)) {
+      throw new Error("No se han encontrado datos locales válidos.");
     }
 
-    const remoteFile = await findDriveFile();
+    const remote = await findFile();
 
-    if (remoteFile && !force) {
-      const remoteVersion = fileVersion(remoteFile);
+    if (remote) {
+      const remoteVersion = versionOf(remote);
 
       if (!knownVersion || remoteVersion !== knownVersion) {
-        conflictDetected = true;
+        conflict = true;
 
         throw new Error(
-          "Drive ha cambiado desde la última sincronización. " +
-          "No se han sobrescrito los datos. Pulsa Sincronizar para resolverlo."
+          "Otro dispositivo ha cambiado los datos de Drive. " +
+          "No se ha sobrescrito ninguna copia. Revisa la sincronización."
         );
       }
-    }
 
-    if (!remoteFile && knownVersion && !force) {
-      conflictDetected = true;
+    } else if (knownVersion) {
+      conflict = true;
 
       throw new Error(
-        "El archivo de Drive ya no existe. No se han subido los datos locales."
+        "La copia de Drive ya no existe. Se ha detenido la subida."
       );
     }
 
-    await uploadState(data);
+    await uploadCloud(data);
+
+    dirty = false;
     status("Sincronizado con Google Drive", "ok");
   }
 
+  function scheduleUpload() {
+    if (!token || conflict) return;
+
+    dirty = true;
+    clearTimeout(uploadTimer);
+
+    uploadTimer = setTimeout(() => {
+      runUpload();
+    }, UPLOAD_DELAY);
+  }
+
+  async function runUpload() {
+    if (!token || conflict || !dirty) return;
+
+    if (syncing) {
+      pending = true;
+      return;
+    }
+
+    syncing = true;
+    updateButtons();
+    status("Guardando cambios en Google Drive…");
+
+    try {
+      await pushToDrive();
+
+    } catch (error) {
+      status(error.message || "Error al guardar en Drive.", "error");
+
+    } finally {
+      syncing = false;
+      updateButtons();
+
+      if (pending && !conflict && token) {
+        pending = false;
+        scheduleUpload();
+      }
+    }
+  }
+
+  async function checkForRemoteChanges() {
+    if (!token || syncing) return;
+
+    try {
+      const remote = await findFile();
+
+      if (!remote) {
+        if (knownVersion) {
+          conflict = true;
+          status(
+            "No se encuentra la copia de Drive. No se han modificado tus datos locales.",
+            "error"
+          );
+        }
+        return;
+      }
+
+      const remoteVersion = versionOf(remote);
+
+      if (remoteVersion === knownVersion) return;
+
+      if (dirty) {
+        conflict = true;
+
+        clearTimeout(uploadTimer);
+
+        status(
+          "Hay cambios pendientes en este dispositivo y cambios nuevos en Drive. Se ha detenido la sincronización para proteger tus datos.",
+          "error"
+        );
+
+        return;
+      }
+
+      status("Descargando cambios de otro dispositivo…");
+
+      await pullFromDrive();
+
+    } catch (error) {
+      status(error.message || "No se han podido comprobar los cambios.", "error");
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+
+    pollTimer = setInterval(() => {
+      checkForRemoteChanges();
+    }, POLL_INTERVAL);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
   async function connectDrive() {
-    if (accessToken || syncing) return;
+    if (token || syncing) return;
 
     status("Conectando con Google…");
 
     try {
       await requestToken();
 
-      const file = await findDriveFile();
+      const file = await findFile();
 
       if (file) {
-        // Drive tiene prioridad al conectar un dispositivo.
-        knownVersion = fileVersion(file);
-        await restoreCloudState();
+        knownVersion = versionOf(file);
 
-        status("Conectado · datos de Drive cargados", "ok");
+        // Drive es la fuente principal al conectar.
+        await pullFromDrive();
 
       } else {
-        // Solo crea la primera copia si todavía no existe en Drive.
+        // Primera conexión: crea la copia inicial.
         knownVersion = null;
-        await uploadLocalState(true);
+        await uploadCloud(localData() || state);
 
-        status("Conectado · copia inicial guardada en Drive", "ok");
+        dirty = false;
+        status("Copia inicial guardada en Google Drive", "ok");
       }
 
-      updateButtons();
+      startPolling();
 
     } catch (error) {
       status(error.message || "No se pudo conectar con Google Drive.", "error");
+
+    } finally {
       updateButtons();
     }
   }
 
-  async function syncManually() {
-    if (!accessToken || syncing) return;
+  async function manualSync() {
+    if (!token || syncing) return;
 
     syncing = true;
     updateButtons();
-    status("Comprobando cambios…");
 
     try {
-      if (conflictDetected) {
-        const useCloud = confirm(
-          "Se han detectado cambios realizados desde otro dispositivo.\n\n" +
-          "Aceptar: descargar la versión de Drive y sustituir los datos de este dispositivo.\n\n" +
-          "Cancelar: conservar los datos de este dispositivo y decidir si quieres subirlos a Drive."
+      if (conflict) {
+        status(
+          "Hay un conflicto entre dispositivos. Tus datos locales no se han sobrescrito. Para resolverlo, vuelve a conectar tras decidir qué dispositivo conservar.",
+          "error"
         );
 
-        if (useCloud) {
-          const file = await findDriveFile();
-
-          if (!file) {
-            throw new Error("No se encuentra el archivo de Drive.");
-          }
-
-          knownVersion = fileVersion(file);
-          await restoreCloudState();
-
-        } else {
-          const overwrite = confirm(
-            "¿Confirmas que quieres sustituir la versión de Google Drive " +
-            "por los datos de este dispositivo?\n\n" +
-            "Esta acción puede descartar cambios hechos en otro dispositivo."
-          );
-
-          if (overwrite) {
-            await uploadLocalState(true);
-          } else {
-            status("No se han modificado los datos.", "ok");
-          }
-        }
+      } else if (dirty) {
+        await pushToDrive();
 
       } else {
-        await uploadLocalState();
+        await checkForRemoteChanges();
       }
 
     } catch (error) {
@@ -368,60 +475,31 @@
     } finally {
       syncing = false;
       updateButtons();
-
-      if (pendingUpload && !conflictDetected && accessToken) {
-        pendingUpload = false;
-        scheduleAutomaticUpload();
-      }
     }
   }
 
-  function scheduleAutomaticUpload() {
-    if (!accessToken || conflictDetected) return;
+  function installSaveHook() {
+    if (typeof saveState !== "function" || originalSave) return;
 
-    clearTimeout(syncTimer);
+    originalSave = saveState;
 
-    syncTimer = setTimeout(async () => {
-      if (syncing) {
-        pendingUpload = true;
-        return;
-      }
-
-      syncing = true;
-      updateButtons();
-      status("Guardando cambios en Drive…");
-
-      try {
-        await uploadLocalState();
-
-      } catch (error) {
-        status(error.message || "Error al sincronizar.", "error");
-
-      } finally {
-        syncing = false;
-        updateButtons();
-
-        if (pendingUpload && !conflictDetected && accessToken) {
-          pendingUpload = false;
-          scheduleAutomaticUpload();
-        }
-      }
-    }, 1500);
+    saveState = function () {
+      originalSave();
+      scheduleUpload();
+    };
   }
 
-  function addDriveControls() {
+  function addControls() {
     const topbar = document.querySelector(".topbar");
 
-    if (!topbar || document.getElementById("drive-sync-controls")) {
-      return;
-    }
+    if (!topbar || byId("drive-sync-controls")) return;
 
     const controls = document.createElement("div");
     controls.id = "drive-sync-controls";
 
     controls.innerHTML = `
       <span id="drive-sync-status" role="status">
-        Conecta Google Drive para cargar tus datos
+        Conecta Google Drive para sincronizar
       </span>
       <button type="button" id="drive-connect-btn" class="btn ghost small">
         Conectar Google Drive
@@ -433,25 +511,14 @@
 
     topbar.appendChild(controls);
 
-    connectBtn().addEventListener("click", connectDrive);
-    syncBtn().addEventListener("click", syncManually);
+    byId("drive-connect-btn").addEventListener("click", connectDrive);
+    byId("drive-sync-btn").addEventListener("click", manualSync);
 
     updateButtons();
   }
 
-  function installSaveHook() {
-    if (typeof saveState !== "function" || originalSaveState) return;
-
-    originalSaveState = saveState;
-
-    saveState = function () {
-      originalSaveState();
-      scheduleAutomaticUpload();
-    };
-  }
-
   function addStyles() {
-    if (document.getElementById("drive-sync-styles")) return;
+    if (byId("drive-sync-styles")) return;
 
     const style = document.createElement("style");
     style.id = "drive-sync-styles";
@@ -503,7 +570,7 @@
 
   function init() {
     addStyles();
-    addDriveControls();
+    addControls();
     installSaveHook();
   }
 
