@@ -284,7 +284,18 @@
     // Descargarlo de nuevo y comparar el contenido.
     const verifiedData = await downloadCloud(savedFile.id);
 
-    if (JSON.stringify(verifiedData) !== JSON.stringify(data)) {
+    // downloadCloud añade categories=[] si el campo no existía.
+    const expectedData = {
+      ...data,
+      categories: Array.isArray(data.categories)
+        ? data.categories
+        : []
+    };
+
+    if (
+      JSON.stringify(verifiedData) !==
+      JSON.stringify(expectedData)
+    ) {
       throw new Error(
         "La verificación del contenido no coincide."
       );
@@ -358,6 +369,7 @@
     updateButtons();
   }
 
+  // La versión de este dispositivo siempre tiene prioridad.
   async function pushToDrive() {
     if (!token || !ready) {
       throw new Error(
@@ -365,55 +377,51 @@
       );
     }
 
-    // Guardar el número de cambios al comenzar esta subida.
+    // Capturar el número de cambios al comenzar la subida.
     const uploadRevision = changeCounter;
 
+    // Crear una copia estable del estado actual.
     const data = JSON.parse(JSON.stringify(state));
 
     if (!valid(data)) {
       throw new Error("No se han encontrado datos válidos.");
     }
 
+    // Comprobar que el archivo original sigue existiendo.
     const remote = await findFile();
 
     if (!remote) {
-      conflict = true;
       throw new Error(
-        "La copia de Drive ya no existe. Se ha detenido la subida."
+        "La copia de Drive ya no existe. " +
+        "No se ha creado ningún archivo nuevo."
       );
     }
 
-    const remoteVersion = versionOf(remote);
-
-    if (!knownVersion || remoteVersion !== knownVersion) {
-      conflict = true;
-
-      throw new Error(
-        "Otro dispositivo ha cambiado los datos de Drive. " +
-        "No se ha sobrescrito ninguna copia."
-      );
-    }
-
+    // No se bloquea por diferencias de versión.
+    // Este dispositivo sustituye la copia remota.
     await uploadCloud(data);
 
-    // Si hubo cambios durante la subida, no marcarlos como guardados.
+    // Si hubo cambios durante la subida, quedan pendientes.
     if (changeCounter === uploadRevision) {
       dirty = false;
+      pending = false;
+
+      status(
+        "Sincronizado y verificado con Google Drive",
+        "ok"
+      );
     } else {
       dirty = true;
       pending = true;
-    }
 
-    status(
-      dirty
-        ? "Guardando los cambios más recientes…"
-        : "Sincronizado y verificado con Google Drive",
-      "ok"
-    );
+      status(
+        "Hay cambios nuevos pendientes de guardar…"
+      );
+    }
   }
 
   function scheduleUpload() {
-    if (!token || !ready || conflict) return;
+    if (!token || !ready) return;
 
     dirty = true;
     clearTimeout(uploadTimer);
@@ -424,8 +432,9 @@
   }
 
   async function runUpload() {
-    if (!token || !ready || conflict || !dirty) return;
+    if (!token || !ready || !dirty) return;
 
+    // Si ya hay una subida, dejar esta pendiente.
     if (syncing) {
       pending = true;
       return;
@@ -448,21 +457,25 @@
       syncing = false;
       updateButtons();
 
-      if (pending && !conflict && token && ready) {
+      // Procesar los cambios que hayan quedado pendientes.
+      if (pending && token && ready) {
         pending = false;
         scheduleUpload();
       }
     }
   }
 
+  // Solo descarga cambios remotos si no hay cambios locales pendientes.
   async function checkForRemoteChanges(force = false) {
     if (!token || !ready || (syncing && !force)) return;
 
     try {
+      // Los cambios locales siempre tienen prioridad.
+      if (dirty) return;
+
       const remote = await findFile();
 
       if (!remote) {
-        conflict = true;
         status(
           "No se encuentra la copia de Drive. Tus datos en memoria siguen intactos.",
           "error"
@@ -474,18 +487,8 @@
 
       if (remoteVersion === knownVersion) return;
 
-      if (dirty) {
-        conflict = true;
-        clearTimeout(uploadTimer);
-
-        status(
-          "Hay cambios en este dispositivo y también en Drive. " +
-          "Se ha detenido la sincronización para proteger ambas copias.",
-          "error"
-        );
-
-        return;
-      }
+      // Comprobar otra vez antes de descargar.
+      if (dirty) return;
 
       status("Descargando cambios de Google Drive…");
       await pullFromDrive();
@@ -558,17 +561,12 @@
     updateButtons();
 
     try {
-      if (conflict) {
-        status(
-          "Existe un conflicto entre dispositivos. " +
-          "No se ha sobrescrito ninguna copia.",
-          "error"
-        );
-
-      } else if (dirty) {
+      if (dirty) {
+        // Subir los cambios locales aunque Drive tenga otra versión.
         await pushToDrive();
 
       } else {
+        // Si no hay cambios locales, comprobar si Drive ha cambiado.
         await checkForRemoteChanges(true);
       }
 
@@ -584,7 +582,7 @@
 
       // Si hubo nuevas ediciones durante la sincronización,
       // programar otra subida.
-      if (dirty && !conflict && token && ready) {
+      if (dirty && token && ready) {
         pending = false;
         scheduleUpload();
       }
