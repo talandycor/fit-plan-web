@@ -79,11 +79,17 @@ function saveState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 
+    console.log("AndriFIT: saveState ejecutado");
+
     if (window.AndriFITDriveSync) {
+      console.log("AndriFIT: avisando a Drive");
       window.AndriFITDriveSync.notifyLocalSave();
+    } else {
+      console.error("AndriFIT: Drive Sync no está disponible");
     }
 
   } catch (e) {
+    console.error("Error al guardar:", e);
     notify("No hay espacio suficiente para guardar. Prueba con una imagen más pequeña.");
   }
 }
