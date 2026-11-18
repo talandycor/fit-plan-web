@@ -24,6 +24,9 @@
   let pending = false;
   let conflict = false;
 
+  // Cuenta los cambios para no perder ediciones durante una subida.
+  let changeCounter = 0;
+
   let uploadTimer = null;
   let pollTimer = null;
 
@@ -211,12 +214,17 @@
     return data;
   }
 
+  // Subida reanudable para admitir archivos grandes con imágenes.
   async function uploadCloud(data) {
     if (!valid(data)) {
       throw new Error("No hay datos válidos para guardar.");
     }
 
-    const boundary = "andrifit_boundary_" + Date.now();
+    const json = JSON.stringify(data);
+
+    const blob = new Blob([json], {
+      type: "application/json"
+    });
 
     const metadata = {
       name: FILE_NAME,
@@ -224,31 +232,37 @@
       ...(fileId ? {} : { parents: ["appDataFolder"] })
     };
 
-    const body = new Blob([
-      `--${boundary}\r\n`,
-      "Content-Type: application/json; charset=UTF-8\r\n\r\n",
-      JSON.stringify(metadata),
-      `\r\n--${boundary}\r\n`,
-      "Content-Type: application/json; charset=UTF-8\r\n\r\n",
-      JSON.stringify(data),
-      `\r\n--${boundary}--`
-    ], {
-      type: `multipart/related; boundary=${boundary}`
-    });
-
     const endpoint = fileId
-      ? `${UPLOAD_API}/files/${encodeURIComponent(fileId)}?uploadType=multipart&fields=id`
-      : `${UPLOAD_API}/files?uploadType=multipart&fields=id`;
+      ? `${UPLOAD_API}/files/${encodeURIComponent(fileId)}?uploadType=resumable&fields=id`
+      : `${UPLOAD_API}/files?uploadType=resumable&fields=id`;
 
-    const response = await driveFetch(endpoint, {
+    const startResponse = await driveFetch(endpoint, {
       method: fileId ? "PATCH" : "POST",
       headers: {
-        "Content-Type": `multipart/related; boundary=${boundary}`
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": "application/json",
+        "X-Upload-Content-Length": String(blob.size)
       },
-      body
+      body: JSON.stringify(metadata)
     });
 
-    const result = await response.json();
+    const uploadUrl = startResponse.headers.get("Location");
+
+    if (!uploadUrl) {
+      throw new Error(
+        "Google Drive no ha proporcionado la dirección de subida."
+      );
+    }
+
+    const uploadResponse = await driveFetch(uploadUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: blob
+    });
+
+    const result = await uploadResponse.json();
 
     if (!result.id) {
       throw new Error(
@@ -258,7 +272,7 @@
 
     fileId = result.id;
 
-    // Verificar que el archivo existe después de subirlo.
+    // Comprobar que el archivo existe en Drive.
     const savedFile = await findFile();
 
     if (!savedFile) {
@@ -267,12 +281,12 @@
       );
     }
 
-    // Comprobar también que el contenido remoto se puede leer.
+    // Descargarlo de nuevo y comparar el contenido.
     const verifiedData = await downloadCloud(savedFile.id);
 
-    if (!valid(verifiedData)) {
+    if (JSON.stringify(verifiedData) !== JSON.stringify(data)) {
       throw new Error(
-        "La copia subida no ha superado la verificación."
+        "La verificación del contenido no coincide."
       );
     }
 
@@ -328,8 +342,8 @@
     pending = false;
     ready = true;
 
-    // Solo después de descargar y validar la copia de Drive
-    // se elimina el antiguo almacenamiento local de AndriFIT.
+    // Limpiar el almacenamiento antiguo solo después
+    // de descargar y validar correctamente la copia de Drive.
     try {
       localStorage.removeItem(LOCAL_KEY);
     } catch (error) {
@@ -351,7 +365,9 @@
       );
     }
 
-    // Capturar una copia estable del estado en memoria.
+    // Guardar el número de cambios al comenzar esta subida.
+    const uploadRevision = changeCounter;
+
     const data = JSON.parse(JSON.stringify(state));
 
     if (!valid(data)) {
@@ -380,8 +396,20 @@
 
     await uploadCloud(data);
 
-    dirty = false;
-    status("Sincronizado y verificado con Google Drive", "ok");
+    // Si hubo cambios durante la subida, no marcarlos como guardados.
+    if (changeCounter === uploadRevision) {
+      dirty = false;
+    } else {
+      dirty = true;
+      pending = true;
+    }
+
+    status(
+      dirty
+        ? "Guardando los cambios más recientes…"
+        : "Sincronizado y verificado con Google Drive",
+      "ok"
+    );
   }
 
   function scheduleUpload() {
@@ -427,8 +455,8 @@
     }
   }
 
-  async function checkForRemoteChanges() {
-    if (!token || !ready || syncing) return;
+  async function checkForRemoteChanges(force = false) {
+    if (!token || !ready || (syncing && !force)) return;
 
     try {
       const remote = await findFile();
@@ -496,8 +524,6 @@
       await requestToken();
 
       // No se crea un archivo nuevo automáticamente.
-      // Primero debe existir la copia que el usuario ha indicado
-      // que es la copia principal.
       const file = await findFile();
 
       if (!file) {
@@ -543,7 +569,7 @@
         await pushToDrive();
 
       } else {
-        await checkForRemoteChanges();
+        await checkForRemoteChanges(true);
       }
 
     } catch (error) {
@@ -555,6 +581,13 @@
     } finally {
       syncing = false;
       updateButtons();
+
+      // Si hubo nuevas ediciones durante la sincronización,
+      // programar otra subida.
+      if (dirty && !conflict && token && ready) {
+        pending = false;
+        scheduleUpload();
+      }
     }
   }
 
@@ -569,7 +602,9 @@
           return;
         }
 
+        changeCounter++;
         dirty = true;
+
         status("Cambios detectados. Preparando sincronización…");
         scheduleUpload();
       },
