@@ -477,19 +477,23 @@
       updateButtons();
     }
   }
-
-  function installSaveHook() {
-    window.addEventListener("andrifit:state-saved", () => {
-      if (!token) return;
+  
+function installSaveHook() {
+  window.AndriFITDriveSync = {
+    notifyLocalSave: () => {
+      if (!token) {
+        status("Conecta Google Drive para guardar los cambios.");
+        return;
+      }
 
       dirty = true;
 
-      status("Cambios guardados en el dispositivo. Preparando Drive…");
+      status("Cambios detectados. Preparando sincronización…");
 
       scheduleUpload();
-    });
+    }
+  };
 }
-
   function addControls() {
     const topbar = document.querySelector(".topbar");
 
