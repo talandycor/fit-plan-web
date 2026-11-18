@@ -79,8 +79,9 @@ function saveState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 
-    // Avisar a Google Drive de que hay cambios que sincronizar
-    window.dispatchEvent(new Event("andrifit:state-saved"));
+    if (window.AndriFITDriveSync) {
+      window.AndriFITDriveSync.notifyLocalSave();
+    }
 
   } catch (e) {
     notify("No hay espacio suficiente para guardar. Prueba con una imagen más pequeña.");
