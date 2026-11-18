@@ -11,7 +11,7 @@
   const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
   const LOCAL_KEY = "fitplan-library-v1";
 
-  const UPLOAD_DELAY = 1200;
+  const UPLOAD_DELAY = 500;
   const POLL_INTERVAL = 8000;
 
   let token = null;
@@ -479,15 +479,16 @@
   }
 
   function installSaveHook() {
-    if (typeof saveState !== "function" || originalSave) return;
+    window.addEventListener("andrifit:state-saved", () => {
+      if (!token) return;
 
-    originalSave = saveState;
+      dirty = true;
 
-    saveState = function () {
-      originalSave();
+      status("Cambios guardados en el dispositivo. Preparando Drive…");
+
       scheduleUpload();
-    };
-  }
+    });
+}
 
   function addControls() {
     const topbar = document.querySelector(".topbar");
