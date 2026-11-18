@@ -31,7 +31,12 @@ const escapeHTML = value => String(value ?? "").replace(/[&<>"']/g, c => ({
 
 const placeholder = "https://placehold.co/600x400/e9ece9/526b58?text=Ejercicio";
 
-let state = loadState();
+let state = {
+  exercises: [],
+  plans: [],
+  sessions: [],
+  categories: DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }))
+};
 let currentView = "exercises";
 let calendarDate = new Date();
 let selectedImage = "";
@@ -39,26 +44,6 @@ let selectedCategory = "";
 let toastTimer;
 
 function loadState() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (saved && Array.isArray(saved.exercises) &&
-        Array.isArray(saved.plans) && Array.isArray(saved.sessions)) {
-      saved.categories = Array.isArray(saved.categories)
-        ? saved.categories
-        : DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }));
-
-      saved.exercises = saved.exercises.map(ex => ({
-        ...ex,
-        categories: Array.isArray(ex.categories) ? ex.categories : [],
-        muscles: Array.isArray(ex.muscles)
-          ? ex.muscles
-          : (ex.muscle ? [ex.muscle] : [])
-      }));
-
-      return saved;
-    }
-  } catch (e) {}
-
   return {
     exercises: [],
     plans: [],
@@ -76,24 +61,15 @@ function maxRecordedWeight(exerciseId) {
 }
 
 function saveState() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  console.log("AndriFIT: cambios realizados en memoria.");
 
-    console.log("AndriFIT: saveState ejecutado");
-
-    if (window.AndriFITDriveSync) {
-      console.log("AndriFIT: avisando a Drive");
-      window.AndriFITDriveSync.notifyLocalSave();
-    } else {
-      console.error("AndriFIT: Drive Sync no está disponible");
-    }
-
-  } catch (e) {
-    console.error("Error al guardar:", e);
-    notify("No hay espacio suficiente para guardar. Prueba con una imagen más pequeña.");
+  if (window.AndriFITDriveSync) {
+    window.AndriFITDriveSync.notifyLocalSave();
+  } else {
+    console.error("AndriFIT: Drive Sync no está disponible.");
+    notify("No se ha podido conectar con Google Drive.");
   }
 }
-
 function notify(message) {
   const toast = $("#toast");
   toast.textContent = message;
