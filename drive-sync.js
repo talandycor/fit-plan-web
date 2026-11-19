@@ -333,7 +333,11 @@
     }));
 
     // La copia descargada pasa a ser el estado activo.
-    state = data;
+    // normalizeState (app.js) añade los grupos musculares editables
+    // y la portada de los planes a los datos antiguos.
+    state = typeof normalizeState === "function"
+      ? normalizeState(data)
+      : data;
 
     if (typeof render === "function") {
       render();

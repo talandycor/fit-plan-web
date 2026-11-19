@@ -16,6 +16,11 @@ const DEFAULT_CATEGORIES = [
   "Rehabilitación y prevención"
 ];
 
+const DEFAULT_MUSCLES = [
+  "Pecho", "Espalda", "Hombros", "Bíceps", "Tríceps",
+  "Piernas", "Glúteos", "Abdominales", "Cardio", "General"
+];
+
 const today = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -29,27 +34,120 @@ const escapeHTML = value => String(value ?? "").replace(/[&<>"']/g, c => ({
   "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
 }[c]));
 
+// Texto sin tildes y en minúsculas para las búsquedas.
+const normalizeText = value => String(value ?? "")
+  .normalize("NFD").replace(/[̀-ͯ]/g, "")
+  .toLocaleLowerCase("es").trim();
+
+const byName = (a, b) => String(a.name || "").localeCompare(String(b.name || ""), "es", { sensitivity: "base" });
+
+const clone = value => JSON.parse(JSON.stringify(value));
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
 const placeholder = "https://placehold.co/600x400/e9ece9/526b58?text=Ejercicio";
 
-let state = {
-  exercises: [],
-  plans: [],
-  sessions: [],
-  categories: DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }))
+// Configuración común para categorías y grupos musculares (se gestionan igual).
+const TAXONOMIES = {
+  category: {
+    key: "categories",
+    icon: "📁",
+    newTitle: "Nueva categoría",
+    editTitle: "Editar categoría",
+    label: "Nombre de la categoría *",
+    placeholder: "Ej. Fuerza tren superior",
+    save: "Guardar categoría",
+    saved: "Categoría guardada.",
+    duplicate: "Ya existe una categoría con ese nombre.",
+    manageTitle: "Gestionar categorías",
+    manageHelp: "Puedes cambiar el nombre o eliminar las carpetas que ya no necesites.",
+    emptyList: "Todavía no hay categorías.",
+    newButton: "+ Nueva categoría",
+    confirmDelete: "¿Eliminar esta categoría? Los ejercicios no se borrarán, solo perderán esta asignación.",
+    deleted: "Categoría eliminada.",
+    manageAction: "manage-categories",
+    editAction: "edit-category",
+    deleteAction: "delete-category",
+    newAction: "new-category"
+  },
+  muscle: {
+    key: "muscleGroups",
+    icon: "💪",
+    newTitle: "Nuevo grupo muscular",
+    editTitle: "Editar grupo muscular",
+    label: "Nombre del grupo muscular *",
+    placeholder: "Ej. Pecho",
+    save: "Guardar grupo muscular",
+    saved: "Grupo muscular guardado.",
+    duplicate: "Ya existe un grupo muscular con ese nombre.",
+    manageTitle: "Gestionar grupos musculares",
+    manageHelp: "Puedes cambiar el nombre o eliminar los grupos musculares. Los cambios se aplican a todos los ejercicios.",
+    emptyList: "Todavía no hay grupos musculares.",
+    newButton: "+ Nuevo grupo muscular",
+    confirmDelete: "¿Eliminar este grupo muscular? Los ejercicios no se borrarán, solo perderán este grupo.",
+    deleted: "Grupo muscular eliminado.",
+    manageAction: "manage-muscles",
+    editAction: "edit-muscle",
+    deleteAction: "delete-muscle",
+    newAction: "new-muscle"
+  }
 };
+
+// Completa los datos antiguos sin borrar nada.
+function normalizeState(data) {
+  const s = data || {};
+  s.exercises = Array.isArray(s.exercises) ? s.exercises : [];
+  s.plans = Array.isArray(s.plans) ? s.plans : [];
+  s.sessions = Array.isArray(s.sessions) ? s.sessions : [];
+  s.categories = Array.isArray(s.categories)
+    ? s.categories
+    : DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }));
+
+  s.exercises.forEach(ex => {
+    ex.categories = Array.isArray(ex.categories) ? ex.categories : [];
+    ex.muscles = Array.isArray(ex.muscles) ? ex.muscles : (ex.muscle ? [ex.muscle] : []);
+  });
+
+  if (!Array.isArray(s.muscleGroups)) {
+    s.muscleGroups = DEFAULT_MUSCLES.map(name => ({ id: uid(), name }));
+  }
+
+  // Si algún ejercicio usa un grupo que no está en la lista, se añade.
+  const known = new Set(s.muscleGroups.map(m => normalizeText(m.name)));
+  s.exercises.forEach(ex => ex.muscles.forEach(name => {
+    if (name && !known.has(normalizeText(name))) {
+      s.muscleGroups.push({ id: uid(), name });
+      known.add(normalizeText(name));
+    }
+  }));
+
+  s.plans.forEach(plan => {
+    plan.items = Array.isArray(plan.items) ? plan.items : [];
+    if (typeof plan.image !== "string") plan.image = "";
+  });
+
+  return s;
+}
+
+let state = normalizeState({ exercises: [], plans: [], sessions: [] });
 let currentView = "exercises";
 let calendarDate = new Date();
 let selectedImage = "";
 let selectedCategory = "";
 let toastTimer;
 
+// Planes
+let selectedPlanId = "";
+let planEditing = false;
+let planDraft = null;
+let planSearch = { text: "", category: "", muscle: "" };
+let planFormItems = [];
+
+// Borrador del ejercicio mientras se crea una categoría/grupo desde su formulario.
+let exerciseDraft = null;
+
 function loadState() {
-  return {
-    exercises: [],
-    plans: [],
-    sessions: [],
-    categories: DEFAULT_CATEGORIES.map(name => ({ id: uid(), name }))
-  };
+  return normalizeState({ exercises: [], plans: [], sessions: [] });
 }
 
 function maxRecordedWeight(exerciseId) {
@@ -70,6 +168,7 @@ function saveState() {
     notify("No se ha podido conectar con Google Drive.");
   }
 }
+
 function notify(message) {
   const toast = $("#toast");
   toast.textContent = message;
@@ -80,7 +179,7 @@ function notify(message) {
 
 function openModal(html) {
   $("#modal-content").innerHTML = html;
-  $("#modal").showModal();
+  if (!$("#modal").open) $("#modal").showModal();
 }
 
 function closeModal() {
@@ -94,10 +193,28 @@ $("#modal").addEventListener("click", e => {
   if (e.target === $("#modal")) closeModal();
 });
 
+function stopPlanEditing() {
+  planEditing = false;
+  planDraft = null;
+  planSearch = { text: "", category: "", muscle: "" };
+}
+
+function confirmDiscardPlan() {
+  if (!planEditing) return true;
+  if (confirm("Tienes cambios sin guardar en este plan. ¿Quieres descartarlos?")) {
+    stopPlanEditing();
+    return true;
+  }
+  return false;
+}
+
 function setView(view) {
+  if (!confirmDiscardPlan()) return false;
+  selectedPlanId = "";
   currentView = view;
   $$(".tab").forEach(tab => tab.classList.toggle("active", tab.dataset.view === view));
   render();
+  return true;
 }
 
 $$(".tab").forEach(tab => {
@@ -110,6 +227,11 @@ function render() {
   if (currentView === "plans") root.innerHTML = renderPlans();
   if (currentView === "calendar") root.innerHTML = renderCalendar();
   if (currentView === "progress") root.innerHTML = renderProgress();
+}
+
+function scrollToContent() {
+  const top = $("#app-content").getBoundingClientRect().top + window.scrollY - 12;
+  if (window.scrollY > top) window.scrollTo({ top, behavior: "smooth" });
 }
 
 function emptyState(icon, title, message, button = "") {
@@ -127,27 +249,46 @@ function categoryCount(categoryId) {
   return state.exercises.filter(ex => (ex.categories || []).includes(categoryId)).length;
 }
 
+function muscleCount(name) {
+  return state.exercises.filter(ex => (ex.muscles || []).includes(name)).length;
+}
+
 function renderExercises() {
   const categories = state.categories.map(category => `
     <button class="folder-card ${selectedCategory === category.id ? "selected" : ""}"
       data-action="open-category" data-id="${category.id}">
       <span class="folder-icon">📁</span>
       <span class="folder-name">${escapeHTML(category.name)}</span>
-      <span class="folder-count">${categoryCount(category.id)} ejercicios</span>
+      <span class="folder-count">${plural(categoryCount(category.id), "ejercicio", "ejercicios")}</span>
+    </button>
+  `).join("");
+
+  const muscles = state.muscleGroups.map(group => `
+    <button class="muscle-chip ${selectedCategory === `muscle:${group.id}` ? "selected" : ""}"
+      data-action="open-category" data-id="muscle:${group.id}">
+      <span>${escapeHTML(group.name)}</span>
+      <small>${muscleCount(group.name)}</small>
     </button>
   `).join("");
 
   const unassigned = state.exercises.filter(ex => !ex.categories?.length);
   const isUnassigned = selectedCategory === "unassigned";
-  const current = state.categories.find(c => c.id === selectedCategory);
+  const isMuscle = selectedCategory.startsWith("muscle:");
+  const currentCategory = !isMuscle ? state.categories.find(c => c.id === selectedCategory) : null;
+  const currentMuscle = isMuscle ? state.muscleGroups.find(m => `muscle:${m.id}` === selectedCategory) : null;
+
+  // Si la carpeta seleccionada ya no existe, volver a la vista general.
+  if (selectedCategory && !isUnassigned && !currentCategory && !currentMuscle) selectedCategory = "";
 
   let visibleExercises = [];
   if (isUnassigned) visibleExercises = unassigned;
-  else if (current) {
-    visibleExercises = state.exercises.filter(ex => (ex.categories || []).includes(current.id));
+  else if (currentCategory) {
+    visibleExercises = state.exercises.filter(ex => (ex.categories || []).includes(currentCategory.id));
+  } else if (currentMuscle) {
+    visibleExercises = state.exercises.filter(ex => (ex.muscles || []).includes(currentMuscle.name));
   }
 
-  visibleExercises.sort((a,b) => a.name.localeCompare(b.name, "es", { sensitivity:"base" }));
+  visibleExercises = [...visibleExercises].sort(byName);
 
   const cards = visibleExercises.map(ex => `
     <article class="card">
@@ -165,8 +306,7 @@ function renderExercises() {
           ${!ex.categories?.length ? `<span class="pill">Sin categoría</span>` : ""}
         </div>
         <div class="exercise-categories muscle-tags">
-          ${(ex.muscles || (ex.muscle ? [ex.muscle] : [])).map(m =>
-            `<span class="pill">${escapeHTML(m)}</span>`).join("")}
+          ${(ex.muscles || []).map(m => `<span class="pill">${escapeHTML(m)}</span>`).join("")}
         </div>
         <div class="card-actions">
           <button class="btn ghost small" data-action="edit-exercise" data-id="${ex.id}">Editar</button>
@@ -200,72 +340,200 @@ function renderExercises() {
       data-action="open-category" data-id="unassigned">
       Sin categoría <span>${unassigned.length}</span>
     </button>
+    <div class="folder-toolbar">
+      <h3>Grupos musculares</h3>
+      <button class="btn ghost small" data-action="manage-muscles">Gestionar grupos</button>
+    </div>
+    <div class="muscle-grid">
+      ${muscles}
+      <button class="muscle-chip add-chip" data-action="new-muscle">＋ Nuevo grupo</button>
+    </div>
   `;
 
   if (!selectedCategory) return folderView;
 
-  const title = isUnassigned ? "Sin categoría" : current?.name || "Categoría";
+  const title = isUnassigned ? "Sin categoría"
+    : currentCategory ? currentCategory.name
+    : currentMuscle?.name || "Categoría";
+
+  const subtitle = currentMuscle
+    ? `Grupo muscular · ${plural(visibleExercises.length, "ejercicio", "ejercicios")} · Orden alfabético`
+    : `${plural(visibleExercises.length, "ejercicio", "ejercicios")} · Orden alfabético`;
+
+  const editButton = currentCategory
+    ? `<button class="btn ghost small" data-action="edit-category" data-id="${currentCategory.id}">Editar carpeta</button>`
+    : currentMuscle
+      ? `<button class="btn ghost small" data-action="edit-muscle" data-id="${currentMuscle.id}">Editar grupo</button>`
+      : "";
+
+  const empty = currentMuscle
+    ? emptyState("💪", "Ningún ejercicio tiene este grupo muscular",
+        "Edita un ejercicio para asignarle este grupo muscular.",
+        `<button class="btn" data-action="new-exercise">Añadir ejercicio</button>`)
+    : emptyState("📂", "Esta carpeta está vacía",
+        "Añade ejercicios o edita uno existente para asignarlo a esta categoría.",
+        `<button class="btn" data-action="new-exercise">Añadir ejercicio</button>`);
+
   return `
     ${folderView}
     <div class="category-content">
       <div class="section-head category-heading">
         <div>
           <button class="back-link" data-action="back-folders">← Todas las carpetas</button>
-          <h2>${escapeHTML(title)}</h2>
-          <p class="muted">${visibleExercises.length} ejercicios · Orden alfabético</p>
+          <h2>${currentMuscle ? "💪 " : ""}${escapeHTML(title)}</h2>
+          <p class="muted">${subtitle}</p>
         </div>
-        ${current ? `<button class="btn ghost small" data-action="edit-category" data-id="${current.id}">Editar carpeta</button>` : ""}
+        ${editButton}
       </div>
-      ${cards ? `<div class="card-grid">${cards}</div>` :
-        emptyState("📂", "Esta carpeta está vacía",
-          "Añade ejercicios o edita uno existente para asignarlo a esta categoría.",
-          `<button class="btn" data-action="new-exercise">Añadir ejercicio</button>`)}
+      ${cards ? `<div class="card-grid">${cards}</div>` : empty}
     </div>
   `;
 }
 
-// ---------- CATEGORÍAS ----------
+// ---------- CATEGORÍAS Y GRUPOS MUSCULARES ----------
 
-function categoryForm(category = {}) {
+function taxonomyForm(type, item = {}, returnTo = "") {
+  const cfg = TAXONOMIES[type];
+  const cancelAction = returnTo === "exercise" ? "back-to-exercise"
+    : returnTo === "manage" ? cfg.manageAction
+    : "close-modal";
+
   openModal(`
-    <h2>${category.id ? "Editar categoría" : "Nueva categoría"}</h2>
-    <form id="category-form" data-id="${category.id || ""}">
+    <h2>${item.id ? cfg.editTitle : cfg.newTitle}</h2>
+    <form id="taxonomy-form" data-type="${type}" data-id="${item.id || ""}" data-return-to="${returnTo}">
       <div class="field">
-        <label for="category-name">Nombre de la categoría *</label>
-        <input id="category-name" name="name" required maxlength="60"
-          value="${escapeHTML(category.name || "")}" placeholder="Ej. Fuerza tren superior">
+        <label for="taxonomy-name">${cfg.label}</label>
+        <input id="taxonomy-name" name="name" required maxlength="60"
+          value="${escapeHTML(item.name || "")}" placeholder="${cfg.placeholder}">
       </div>
       <div class="modal-actions">
-        <button type="button" class="btn ghost" data-action="close-modal">Cancelar</button>
-        <button class="btn" type="submit">Guardar categoría</button>
+        <button type="button" class="btn ghost" data-action="${cancelAction}">Cancelar</button>
+        <button class="btn" type="submit">${cfg.save}</button>
       </div>
     </form>
   `);
 }
 
-function manageCategories() {
-  const rows = state.categories.map(cat => `
+function manageTaxonomy(type) {
+  const cfg = TAXONOMIES[type];
+  const rows = state[cfg.key].map(item => `
     <div class="category-manage-row">
-      <span>📁 ${escapeHTML(cat.name)}</span>
+      <span>${cfg.icon} ${escapeHTML(item.name)}</span>
       <span class="category-manage-actions">
-        <button class="btn ghost small" data-action="edit-category" data-id="${cat.id}">Editar</button>
-        <button class="btn danger small" data-action="delete-category" data-id="${cat.id}">Eliminar</button>
+        <button class="btn ghost small" data-action="${cfg.editAction}" data-id="${item.id}" data-from="manage">Editar</button>
+        <button class="btn danger small" data-action="${cfg.deleteAction}" data-id="${item.id}">Eliminar</button>
       </span>
     </div>
   `).join("");
 
   openModal(`
-    <h2>Gestionar categorías</h2>
-    <p class="muted">Puedes cambiar el nombre o eliminar las carpetas que ya no necesites.</p>
-    ${rows || `<p class="muted">Todavía no hay categorías.</p>`}
+    <h2>${cfg.manageTitle}</h2>
+    <p class="muted">${cfg.manageHelp}</p>
+    ${rows || `<p class="muted">${cfg.emptyList}</p>`}
     <div class="modal-actions">
       <button class="btn ghost" data-action="close-modal">Cerrar</button>
-      <button class="btn" data-action="new-category">+ Nueva categoría</button>
+      <button class="btn" data-action="${cfg.newAction}" data-from="manage">${cfg.newButton}</button>
     </div>
   `);
 }
 
+function deleteTaxonomy(type, id) {
+  const cfg = TAXONOMIES[type];
+  const item = state[cfg.key].find(x => x.id === id);
+  if (!item || !confirm(cfg.confirmDelete)) return;
+
+  state[cfg.key] = state[cfg.key].filter(x => x.id !== id);
+
+  if (type === "category") {
+    state.exercises.forEach(ex => {
+      ex.categories = (ex.categories || []).filter(catId => catId !== id);
+    });
+    if (selectedCategory === id) selectedCategory = "";
+  } else {
+    state.exercises.forEach(ex => {
+      ex.muscles = (ex.muscles || []).filter(name => name !== item.name);
+      ex.muscle = ex.muscles[0] || "";
+    });
+    if (selectedCategory === `muscle:${id}`) selectedCategory = "";
+  }
+
+  saveState();
+  render();
+  manageTaxonomy(type);
+  notify(cfg.deleted);
+}
+
+function saveTaxonomy(form, data) {
+  const type = form.dataset.type;
+  const cfg = TAXONOMIES[type];
+  if (!cfg) return;
+
+  const name = String(data.get("name") || "").trim();
+  if (!name) return;
+
+  const list = state[cfg.key];
+  const duplicate = list.some(x =>
+    x.name.toLocaleLowerCase("es") === name.toLocaleLowerCase("es") &&
+    x.id !== form.dataset.id
+  );
+  if (duplicate) return notify(cfg.duplicate);
+
+  const existing = list.find(x => x.id === form.dataset.id);
+  let created = null;
+
+  if (existing) {
+    // Renombrar un grupo muscular actualiza todos los ejercicios que lo usan.
+    if (type === "muscle" && existing.name !== name) {
+      const oldName = existing.name;
+      state.exercises.forEach(ex => {
+        ex.muscles = (ex.muscles || []).map(m => m === oldName ? name : m);
+        ex.muscle = ex.muscles[0] || "";
+      });
+      if (exerciseDraft) {
+        exerciseDraft.muscles = exerciseDraft.muscles.map(m => m === oldName ? name : m);
+      }
+    }
+    existing.name = name;
+  } else {
+    created = { id: uid(), name };
+    list.push(created);
+  }
+
+  saveState();
+  render();
+
+  const returnTo = form.dataset.returnTo;
+  if (returnTo === "exercise" && exerciseDraft) {
+    const draft = exerciseDraft;
+    exerciseDraft = null;
+    if (created) {
+      if (type === "category") draft.categories.push(created.id);
+      else draft.muscles.push(created.name);
+    }
+    exerciseForm(draft);
+  } else if (returnTo === "manage") {
+    manageTaxonomy(type);
+  } else {
+    closeModal();
+  }
+
+  notify(cfg.saved);
+}
+
 // ---------- EJERCICIOS ----------
+
+function captureExerciseDraft() {
+  const form = $("#exercise-form");
+  if (!form) return null;
+  const data = new FormData(form);
+  return {
+    id: form.dataset.id || "",
+    name: String(data.get("name") || ""),
+    categories: data.getAll("categories").map(String),
+    muscles: data.getAll("muscles").map(String),
+    image: selectedImage || ""
+  };
+}
 
 function exerciseForm(ex = {}) {
   selectedImage = ex.image || "";
@@ -287,7 +555,7 @@ function exerciseForm(ex = {}) {
       <div class="field">
         <span class="field-label">Categorías</span>
         <p class="help">Puedes seleccionar varias. El ejercicio aparecerá en todas las carpetas elegidas.</p>
-        <div class="category-checkboxes">
+        ${state.categories.length ? `<div class="category-checkboxes">
           ${state.categories.map(cat => `
             <label class="category-check">
               <input type="checkbox" name="categories" value="${cat.id}"
@@ -295,8 +563,8 @@ function exerciseForm(ex = {}) {
               <span>${escapeHTML(cat.name)}</span>
             </label>
           `).join("")}
-        </div>
-        <button type="button" class="btn ghost small" data-action="new-category-from-exercise">
+        </div>` : `<p class="help">Todavía no hay categorías.</p>`}
+        <button type="button" class="btn ghost small field-inline-btn" data-action="new-category-from-exercise">
           + Crear categoría
         </button>
       </div>
@@ -304,15 +572,18 @@ function exerciseForm(ex = {}) {
       <div class="field">
         <span class="field-label">Grupos musculares</span>
         <p class="help">Puedes seleccionar más de un grupo muscular. Esto es independiente de las categorías o carpetas.</p>
-        <div class="category-checkboxes muscle-checkboxes">
-          ${["Pecho","Espalda","Hombros","Bíceps","Tríceps","Piernas","Glúteos","Abdominales","Cardio","General"].map(m => `
+        ${state.muscleGroups.length ? `<div class="category-checkboxes muscle-checkboxes">
+          ${state.muscleGroups.map(group => `
             <label class="category-check">
-              <input type="checkbox" name="muscles" value="${m}"
-                ${selectedMuscles.includes(m) ? "checked" : ""}>
-              <span>${m}</span>
+              <input type="checkbox" name="muscles" value="${escapeHTML(group.name)}"
+                ${selectedMuscles.includes(group.name) ? "checked" : ""}>
+              <span>${escapeHTML(group.name)}</span>
             </label>
           `).join("")}
-        </div>
+        </div>` : `<p class="help">Todavía no hay grupos musculares.</p>`}
+        <button type="button" class="btn ghost small field-inline-btn" data-action="new-muscle-from-exercise">
+          + Crear grupo muscular
+        </button>
       </div>
 
       <div class="field">
@@ -333,13 +604,23 @@ function exerciseForm(ex = {}) {
   `);
 
   $("#image-upload").addEventListener("change", handleImageUpload);
-  $("#suggest-images").addEventListener("click", searchImages);
+  $("#suggest-images").addEventListener("click", () =>
+    searchImages($("#ex-name").value.trim(), "exercise", "Escribe primero el nombre del ejercicio."));
 }
 
 function updateSelectedImage(url) {
   selectedImage = url;
-  $("#image-value").value = url;
-  $("#image-preview").src = url || placeholder;
+  const input = $("#image-value");
+  if (input) input.value = url;
+  const preview = $("#image-preview");
+  if (preview) preview.src = url || placeholder;
+
+  // Vista previa de la portada de un plan.
+  const cover = $("#plan-cover-preview");
+  if (cover) cover.innerHTML = planCoverHTML({ image: url, items: planFormItems }, "plan-cover-preview");
+  const mode = $("#plan-cover-mode");
+  if (mode) mode.textContent = coverModeText();
+
   $$(".image-choice").forEach(btn => btn.classList.toggle("selected", btn.dataset.image === url));
 }
 
@@ -355,16 +636,15 @@ function handleImageUpload(event) {
   reader.readAsDataURL(file);
 }
 
-async function searchImages() {
-  const query = $("#ex-name").value.trim();
-  if (!query) return notify("Escribe primero el nombre del ejercicio.");
+async function searchImages(query, suffix = "exercise", emptyMessage = "Escribe primero un nombre.") {
+  if (!query) return notify(emptyMessage);
 
   const results = $("#image-results");
   results.innerHTML = `<p class="help">Buscando imágenes...</p>`;
 
   try {
     const url = "https://commons.wikimedia.org/w/api.php?action=query&generator=search"
-      + "&gsrsearch=" + encodeURIComponent(query + " exercise")
+      + "&gsrsearch=" + encodeURIComponent(`${query} ${suffix}`.trim())
       + "&gsrnamespace=6&gsrlimit=9&prop=imageinfo&iiprop=url"
       + "&iiurlwidth=300&format=json&origin=*";
 
@@ -384,7 +664,7 @@ async function searchImages() {
 
     results.innerHTML = `<p class="help">Elige una imagen para utilizarla como portada:</p>
       <div class="image-results">${images.map(img => `
-        <button type="button" class="image-choice" data-image="${escapeHTML(img.url)}"
+        <button type="button" class="image-choice ${img.url === selectedImage ? "selected" : ""}" data-image="${escapeHTML(img.url)}"
           title="${escapeHTML(img.title)}">
           <img src="${escapeHTML(img.url)}" alt="${escapeHTML(img.title)}">
         </button>`).join("")}</div>
@@ -400,36 +680,62 @@ async function searchImages() {
 
 // ---------- PLANES ----------
 
-function renderPlans() {
-  const cards = state.plans.map(plan => {
-    const names = plan.items.map(item => {
-      const ex = state.exercises.find(e => e.id === item.exerciseId);
-      return `<div class="plan-exercise-row">
-        <img src="${escapeHTML(ex?.image || placeholder)}" alt="">
-        <span>${escapeHTML(ex?.name || item.name || "Ejercicio eliminado")}
-          <small>${item.sets} × ${escapeHTML(item.reps)} · ${item.weight ? `${escapeHTML(item.weight)} kg` : "Peso por definir"}</small>
-        </span>
-      </div>`;
-    }).join("");
+// Portada del plan: imagen propia/sugerida o collage automático de sus ejercicios.
+function planCoverHTML(plan, extraClass = "") {
+  const cls = `plan-cover ${extraClass}`.trim();
+  const fallback = `onerror="this.src='${placeholder}'"`;
 
-    return `<article class="card plan-card">
-      <div class="card-title-row">
-        <h3>${escapeHTML(plan.name)}</h3>
-        <span class="pill">${plan.items.length} ejercicios</span>
+  if (plan.image) {
+    return `<div class="${cls}"><img src="${escapeHTML(plan.image)}" alt="" ${fallback}></div>`;
+  }
+
+  const items = plan.items || [];
+  const images = items
+    .map(item => state.exercises.find(e => e.id === item.exerciseId)?.image)
+    .filter(Boolean)
+    .slice(0, 4);
+
+  if (!images.length) {
+    return `<div class="${cls} plan-cover-empty">
+      <span>▤</span>
+      <small>${items.length ? "Collage sin imágenes" : "Sin ejercicios todavía"}</small>
+    </div>`;
+  }
+
+  return `<div class="${cls} collage collage-${images.length}">
+    ${images.map(src => `<img src="${escapeHTML(src)}" alt="" ${fallback}>`).join("")}
+  </div>`;
+}
+
+function coverModeText() {
+  return selectedImage
+    ? "Portada: imagen personalizada."
+    : "Portada: collage automático con los ejercicios del plan.";
+}
+
+function renderPlans() {
+  if (selectedPlanId) {
+    const plan = state.plans.find(p => p.id === selectedPlanId);
+    if (plan) return renderPlanDetail(plan);
+    selectedPlanId = "";
+    stopPlanEditing();
+  }
+
+  const cards = state.plans.map(plan => `
+    <article class="card plan-tile" role="button" tabindex="0"
+      data-action="open-plan" data-id="${plan.id}" aria-label="Abrir ${escapeHTML(plan.name)}">
+      ${planCoverHTML(plan)}
+      <div class="plan-tile-body">
+        <h3 class="plan-tile-name">${escapeHTML(plan.name)}</h3>
+        <span class="pill">${plural(plan.items.length, "ejercicio", "ejercicios")}</span>
       </div>
-      <div class="plan-exercises">${names || "Sin ejercicios todavía"}</div>
-      <div class="card-actions">
-        <button class="btn ghost small" data-action="edit-plan" data-id="${plan.id}">Editar</button>
-        <button class="btn ghost small" data-action="start-plan" data-id="${plan.id}">Entrenar</button>
-        <button class="btn danger small" data-action="delete-plan" data-id="${plan.id}">Eliminar</button>
-      </div>
-    </article>`;
-  }).join("");
+    </article>
+  `).join("");
 
   return `
     <div class="section-head">
       <div><h2>Mis planes</h2>
-      <p class="muted">Combina tus ejercicios y configura cada rutina.</p></div>
+      <p class="muted">Toca un plan para ver sus ejercicios, editarlo o entrenar.</p></div>
       <button class="btn" data-action="new-plan">+ Crear plan</button>
     </div>
     ${cards ? `<div class="card-grid">${cards}</div>` :
@@ -439,25 +745,303 @@ function renderPlans() {
   `;
 }
 
-function planForm(plan = {}) {
-  if (!state.exercises.length) {
-    openModal(`<h2>Primero añade ejercicios</h2>
-      <p class="muted">Crea algunos ejercicios en tu biblioteca. Después podrás combinarlos en tus planes.</p>
-      <div class="modal-actions">
-        <button class="btn ghost" data-action="close-modal">Cerrar</button>
-        <button class="btn" data-action="go-exercises">Ir a ejercicios</button>
-      </div>`);
-    return;
+function planSubtitle(plan, items) {
+  return `${plural(items.length, "ejercicio", "ejercicios")} · ${plan.image ? "Portada personalizada" : "Portada: collage de ejercicios"}`;
+}
+
+function renderPlanDetail(plan) {
+  const editing = planEditing && planDraft?.id === plan.id;
+  const items = editing ? planDraft.items : plan.items;
+
+  const actions = editing
+    ? `<button class="btn ghost" data-action="cancel-plan-edit">Cancelar</button>
+       <button class="btn" data-action="save-plan-exercises">Guardar cambios</button>`
+    : `<button class="btn" data-action="start-plan" data-id="${plan.id}">Entrenar</button>
+       <button class="btn secondary" data-action="edit-plan-exercises" data-id="${plan.id}">Editar ejercicios</button>
+       <button class="btn ghost" data-action="edit-plan" data-id="${plan.id}">Nombre y portada</button>
+       <button class="btn danger" data-action="delete-plan" data-id="${plan.id}">Eliminar</button>`;
+
+  return `
+    <button class="back-link" data-action="back-plans">← Todos los planes</button>
+    <div class="plan-detail-head">
+      <div id="plan-detail-cover-wrap">${planCoverHTML({ ...plan, items }, "plan-detail-cover")}</div>
+      <div class="plan-detail-title">
+        <h2>${escapeHTML(plan.name)}</h2>
+        <p class="muted" id="plan-detail-count">${planSubtitle(plan, items)}</p>
+        <div class="plan-detail-actions">${actions}</div>
+      </div>
+    </div>
+    ${editing ? renderPlanEditor() : renderPlanTable(plan)}
+  `;
+}
+
+function renderPlanTable(plan) {
+  if (!plan.items.length) {
+    return emptyState("▤", "Este plan no tiene ejercicios",
+      "Pulsa en «Editar ejercicios» para buscarlos y añadirlos.",
+      `<button class="btn" data-action="edit-plan-exercises" data-id="${plan.id}">Añadir ejercicios</button>`);
   }
 
-  const existing = new Map((plan.items || []).map(i => [i.exerciseId, i]));
-  const orderedExercises = [
-    ...(plan.items || []).map(item => state.exercises.find(ex => ex.id === item.exerciseId)).filter(Boolean),
-    ...state.exercises.filter(ex => !(plan.items || []).some(item => item.exerciseId === ex.id))
-  ];
+  const rows = plan.items.map((item, index) => {
+    const ex = state.exercises.find(e => e.id === item.exerciseId);
+    return `<tr>
+      <td class="col-num">${index + 1}</td>
+      <td class="col-ex">
+        <div class="plan-table-ex">
+          <img src="${escapeHTML(ex?.image || placeholder)}" alt="" onerror="this.src='${placeholder}'">
+          <span>${escapeHTML(ex?.name || item.name || "Ejercicio eliminado")}</span>
+        </div>
+      </td>
+      <td>${escapeHTML(item.sets)}</td>
+      <td>${escapeHTML(item.reps)}</td>
+      <td>${item.weight ? `${escapeHTML(item.weight)} kg` : `<span class="muted-cell">Por definir</span>`}</td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="card table-card">
+      <div class="table-scroll">
+        <table class="plan-table">
+          <thead>
+            <tr><th class="col-num">#</th><th>Ejercicio</th><th>Series</th><th>Reps</th><th>Peso</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function planEditorTableHTML() {
+  const items = planDraft?.items || [];
+  if (!items.length) {
+    return `<div class="empty"><div class="empty-icon">▤</div>
+      <h3>Todavía no hay ejercicios en el plan</h3>
+      <p>Búscalos arriba y pulsa «+ Añadir».</p></div>`;
+  }
+
+  const rows = items.map((item, i) => {
+    const ex = state.exercises.find(e => e.id === item.exerciseId);
+    const max = maxRecordedWeight(item.exerciseId);
+    return `<tr>
+      <td class="col-order">
+        <div class="order-buttons">
+          <button type="button" class="btn ghost small" data-action="move-plan-item" data-id="${i}" data-dir="up"
+            ${i === 0 ? "disabled" : ""} aria-label="Subir">↑</button>
+          <button type="button" class="btn ghost small" data-action="move-plan-item" data-id="${i}" data-dir="down"
+            ${i === items.length - 1 ? "disabled" : ""} aria-label="Bajar">↓</button>
+        </div>
+      </td>
+      <td class="col-ex">
+        <div class="plan-table-ex">
+          <img src="${escapeHTML(ex?.image || placeholder)}" alt="" onerror="this.src='${placeholder}'">
+          <span>${i + 1}. ${escapeHTML(ex?.name || item.name || "Ejercicio eliminado")}
+            <small>${max ? `Máximo registrado: ${max} kg` : "Sin pesos registrados todavía"}</small>
+          </span>
+        </div>
+      </td>
+      <td data-label="Series">
+        <input class="table-input" type="number" min="1" max="30" inputmode="numeric"
+          value="${escapeHTML(item.sets)}" data-index="${i}" data-field="sets" aria-label="Series">
+      </td>
+      <td data-label="Reps">
+        <input class="table-input" type="text" value="${escapeHTML(item.reps)}"
+          data-index="${i}" data-field="reps" aria-label="Repeticiones">
+      </td>
+      <td data-label="Peso (kg)">
+        <input class="table-input" type="number" min="0" step="0.5" inputmode="decimal"
+          value="${escapeHTML(item.weight)}" placeholder="${max ? `Máx. ${max}` : "Kg"}"
+          data-index="${i}" data-field="weight" aria-label="Peso en kg">
+      </td>
+      <td class="col-remove">
+        <button type="button" class="btn danger small" data-action="remove-plan-item" data-id="${i}"
+          aria-label="Quitar del plan">✕</button>
+      </td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="card table-card">
+      <div class="table-scroll">
+        <table class="plan-table editable">
+          <thead>
+            <tr><th>Orden</th><th>Ejercicio</th><th>Series</th><th>Reps</th><th>Peso (kg)</th><th></th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderPlanEditor() {
+  const categoryOptions = [...state.categories].sort(byName).map(c =>
+    `<option value="${c.id}" ${planSearch.category === c.id ? "selected" : ""}>${escapeHTML(c.name)}</option>`
+  ).join("");
+
+  const muscleOptions = [...state.muscleGroups].sort(byName).map(m =>
+    `<option value="${escapeHTML(m.name)}" ${planSearch.muscle === m.name ? "selected" : ""}>${escapeHTML(m.name)}</option>`
+  ).join("");
+
+  return `
+    <div class="card plan-search-card">
+      <h3>Añadir ejercicios</h3>
+      <p class="help">Busca por nombre de ejercicio, categoría o grupo muscular. Los resultados salen en orden alfabético.</p>
+      <div class="plan-search-bar">
+        <input id="plan-search-text" type="search" autocomplete="off"
+          placeholder="Buscar ejercicio, categoría o grupo…" value="${escapeHTML(planSearch.text)}">
+        <select id="plan-search-category" aria-label="Filtrar por categoría">
+          <option value="">Todas las categorías</option>
+          ${categoryOptions}
+        </select>
+        <select id="plan-search-muscle" aria-label="Filtrar por grupo muscular">
+          <option value="">Todos los grupos musculares</option>
+          ${muscleOptions}
+        </select>
+        <button type="button" class="btn ghost" data-action="clear-plan-search">Limpiar</button>
+      </div>
+      <div id="plan-search-results">${planSearchResultsHTML()}</div>
+    </div>
+
+    <h3 class="editor-section-title">Ejercicios del plan</h3>
+    <p class="help editor-section-help">Usa las flechas para cambiar el orden y ajusta series, repeticiones y peso.</p>
+    <div id="plan-editor-table">${planEditorTableHTML()}</div>
+
+    <div class="modal-actions">
+      <button class="btn ghost" data-action="cancel-plan-edit">Cancelar</button>
+      <button class="btn" data-action="save-plan-exercises">Guardar cambios</button>
+    </div>
+  `;
+}
+
+function planSearchResultsHTML() {
+  if (!state.exercises.length) {
+    return `<p class="help">Todavía no tienes ejercicios en tu biblioteca.
+      <button type="button" class="link-button" data-action="go-exercises">Ir a Ejercicios</button></p>`;
+  }
+
+  const text = normalizeText(planSearch.text);
+  if (!text && !planSearch.category && !planSearch.muscle) {
+    return `<p class="help search-hint">Escribe algo o elige una categoría o grupo muscular para ver ejercicios.</p>`;
+  }
+
+  const added = new Set((planDraft?.items || []).map(i => i.exerciseId));
+  const categoryNames = ex => (ex.categories || [])
+    .map(id => state.categories.find(c => c.id === id)?.name)
+    .filter(Boolean);
+
+  const results = state.exercises.filter(ex => {
+    if (planSearch.category && !(ex.categories || []).includes(planSearch.category)) return false;
+    if (planSearch.muscle && !(ex.muscles || []).includes(planSearch.muscle)) return false;
+    if (!text) return true;
+    return [ex.name, ...categoryNames(ex), ...(ex.muscles || [])]
+      .some(value => normalizeText(value).includes(text));
+  }).sort(byName);
+
+  if (!results.length) return `<p class="help search-hint">No hay ejercicios que coincidan con la búsqueda.</p>`;
+
+  return `<p class="help">${plural(results.length, "resultado", "resultados")} · Orden alfabético</p>
+    <div class="search-results">
+      ${results.map(ex => {
+        const isAdded = added.has(ex.id);
+        const tags = [...(ex.muscles || []), ...categoryNames(ex)].join(" · ");
+        return `<div class="search-result">
+          <img src="${escapeHTML(ex.image || placeholder)}" alt="" onerror="this.src='${placeholder}'">
+          <div class="search-result-info">
+            <strong>${escapeHTML(ex.name)}</strong>
+            <small>${escapeHTML(tags || "Sin categoría")}</small>
+          </div>
+          ${resultButtonHTML(ex.id, isAdded)}
+        </div>`;
+      }).join("")}
+    </div>`;
+}
+
+function resultButtonHTML(exerciseId, isAdded) {
+  return `<button type="button" class="btn ${isAdded ? "ghost" : "secondary"} small"
+    data-action="add-plan-exercise" data-id="${exerciseId}" ${isAdded ? "disabled" : ""}>
+    ${isAdded ? "Añadido ✓" : "+ Añadir"}</button>`;
+}
+
+function setResultButtonState(exerciseId, isAdded) {
+  const button = $(`#plan-search-results [data-action="add-plan-exercise"][data-id="${exerciseId}"]`);
+  if (button) button.outerHTML = resultButtonHTML(exerciseId, isAdded);
+}
+
+function refreshPlanSearch() {
+  const box = $("#plan-search-results");
+  if (box) box.innerHTML = planSearchResultsHTML();
+}
+
+// Actualiza solo la tabla y la portada, sin perder la búsqueda ni el scroll.
+function refreshPlanEditor() {
+  const plan = state.plans.find(p => p.id === selectedPlanId);
+  if (!plan || !planDraft) return render();
+  const table = $("#plan-editor-table");
+  if (table) table.innerHTML = planEditorTableHTML();
+  const cover = $("#plan-detail-cover-wrap");
+  if (cover) cover.innerHTML = planCoverHTML({ ...plan, items: planDraft.items }, "plan-detail-cover");
+  const count = $("#plan-detail-count");
+  if (count) count.textContent = planSubtitle(plan, planDraft.items);
+}
+
+function startPlanEditing(planId) {
+  const plan = state.plans.find(p => p.id === planId);
+  if (!plan) return;
+  selectedPlanId = plan.id;
+  planDraft = clone(plan);
+  planEditing = true;
+  planSearch = { text: "", category: "", muscle: "" };
+  render();
+  setTimeout(() => $("#plan-search-text")?.focus({ preventScroll: true }), 50);
+}
+
+function addExerciseToDraft(exerciseId) {
+  if (!planDraft || planDraft.items.some(i => i.exerciseId === exerciseId)) return;
+  const ex = state.exercises.find(e => e.id === exerciseId);
+  if (!ex) return;
+  const max = maxRecordedWeight(ex.id);
+  planDraft.items.push({
+    exerciseId: ex.id,
+    name: ex.name,
+    sets: 3,
+    reps: "10",
+    weight: max ? String(max) : ""
+  });
+  setResultButtonState(ex.id, true);
+  refreshPlanEditor();
+  notify(`${ex.name} añadido al plan.`);
+}
+
+function savePlanDraft() {
+  const plan = state.plans.find(p => p.id === planDraft?.id);
+  if (!plan) {
+    stopPlanEditing();
+    return render();
+  }
+
+  plan.items = planDraft.items.map(item => ({
+    exerciseId: item.exerciseId,
+    name: state.exercises.find(e => e.id === item.exerciseId)?.name || item.name || "Ejercicio",
+    sets: Math.max(1, Number(item.sets) || 3),
+    reps: String(item.reps ?? "").trim() || "10",
+    weight: String(item.weight ?? "").trim()
+  }));
+
+  stopPlanEditing();
+  saveState();
+  render();
+  notify("Plan guardado.");
+}
+
+// Crear un plan o cambiar su nombre y portada.
+function planForm(plan = {}) {
+  selectedImage = plan.image || "";
+  planFormItems = plan.items || [];
 
   openModal(`
-    <h2>${plan.id ? "Editar plan" : "Crear plan"}</h2>
+    <h2>${plan.id ? "Nombre y portada del plan" : "Crear plan"}</h2>
+    ${plan.id ? "" : `<p class="muted">Después podrás buscar y añadir los ejercicios del plan.</p>`}
     <form id="plan-form" data-id="${plan.id || ""}">
       <div class="field">
         <label for="plan-name">Nombre del plan *</label>
@@ -465,52 +1049,29 @@ function planForm(plan = {}) {
           value="${escapeHTML(plan.name || "")}" placeholder="Ej. Día A · Pecho y tríceps">
       </div>
       <div class="field">
-        <span class="field-label">Selecciona y ordena los ejercicios</span>
-        <p class="help">Marca los ejercicios que quieras incluir. Usa las flechas para cambiar su orden. La imagen es la que guardaste en Ejercicios.</p>
-        <div class="exercise-picker" id="plan-exercise-picker">
-          ${orderedExercises.map(ex => {
-            const item = existing.get(ex.id);
-            const maxWeight = maxRecordedWeight(ex.id);
-            const suggestedWeight = maxWeight ? String(maxWeight) : (item?.weight || "");
-            return `<div class="picker-row" data-exercise-row="${ex.id}">
-              <input type="checkbox" name="exercise" value="${ex.id}" ${item ? "checked" : ""}>
-              <img src="${escapeHTML(ex.image || placeholder)}" alt="">
-              <div>
-                <strong>${escapeHTML(ex.name)}</strong>
-                <div class="picker-config">
-                  <input type="number" min="1" max="30" name="sets-${ex.id}" value="${item?.sets ?? 3}" placeholder="Series" aria-label="Series">
-                  <input type="text" name="reps-${ex.id}" value="${escapeHTML(item?.reps ?? "10")}" placeholder="Reps" aria-label="Repeticiones">
-                  <input type="number" min="0" step="0.5" name="weight-${ex.id}" value="${escapeHTML(suggestedWeight)}" placeholder="${maxWeight ? `Máx. ${maxWeight} kg` : "Kg"}" aria-label="Peso en kg">
-                </div>
-                <div class="picker-order">
-                  <button type="button" class="btn ghost small" data-move="up" aria-label="Subir ${escapeHTML(ex.name)}">↑</button>
-                  <button type="button" class="btn ghost small" data-move="down" aria-label="Bajar ${escapeHTML(ex.name)}">↓</button>
-                  <small>${maxWeight ? `Máximo registrado: ${maxWeight} kg` : "Sin pesos registrados todavía"}</small>
-                </div>
-              </div>
-            </div>`;
-          }).join("")}
+        <span class="field-label">Portada del plan</span>
+        <div id="plan-cover-preview">${planCoverHTML({ image: selectedImage, items: planFormItems }, "plan-cover-preview")}</div>
+        <p class="help" id="plan-cover-mode">${coverModeText()}</p>
+        <input type="hidden" name="image" id="image-value" value="${escapeHTML(selectedImage)}">
+        <div class="cover-options">
+          <button type="button" class="btn secondary" data-action="use-collage">Usar collage de ejercicios</button>
+          <label class="btn secondary" for="image-upload">Subir imagen desde mi dispositivo</label>
+          <input id="image-upload" type="file" accept="image/*" hidden>
+          <button type="button" class="btn ghost" id="suggest-images">Buscar imágenes sugeridas</button>
         </div>
-        <p class="help">El peso sugerido se obtiene del máximo registrado para ese ejercicio en tus sesiones. Puedes cambiarlo para este plan.</p>
+        <p class="help">El collage se crea solo con las imágenes de los primeros ejercicios del plan. Las imágenes sugeridas se buscan por el nombre del plan.</p>
+        <div id="image-results"></div>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancelar</button>
-        <button class="btn" type="submit">Guardar plan</button>
+        <button class="btn" type="submit">${plan.id ? "Guardar" : "Crear y añadir ejercicios"}</button>
       </div>
     </form>
   `);
 
-  $$("#plan-exercise-picker [data-move]").forEach(button => {
-    button.addEventListener("click", () => {
-      const row = button.closest(".picker-row");
-      if (!row) return;
-      if (button.dataset.move === "up" && row.previousElementSibling) {
-        row.parentElement.insertBefore(row, row.previousElementSibling);
-      } else if (button.dataset.move === "down" && row.nextElementSibling) {
-        row.parentElement.insertBefore(row.nextElementSibling, row);
-      }
-    });
-  });
+  $("#image-upload").addEventListener("change", handleImageUpload);
+  $("#suggest-images").addEventListener("click", () =>
+    searchImages($("#plan-name").value.trim(), "workout", "Escribe primero el nombre del plan."));
 }
 
 // ---------- SESIONES ----------
@@ -546,7 +1107,7 @@ function sessionForm(planId, date) {
       </div>`;
     }).join("");
   } else {
-    rows = state.exercises.map(ex => {
+    rows = [...state.exercises].sort(byName).map(ex => {
       const maxWeight = maxRecordedWeight(ex.id);
       return `<div class="picker-row free-exercise-row">
         <input type="checkbox" name="free-exercise" value="${ex.id}">
@@ -733,16 +1294,53 @@ function renderProgress() {
 $("#app-content").addEventListener("click", event => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
-  handleAction(button.dataset.action, button.dataset.id, button.dataset.date);
+  handleAction(button.dataset.action, button.dataset.id, button.dataset.date, button);
 });
 
 $("#modal-content").addEventListener("click", event => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
-  handleAction(button.dataset.action, button.dataset.id, button.dataset.date);
+  handleAction(button.dataset.action, button.dataset.id, button.dataset.date, button);
 });
 
-function handleAction(action, id, date) {
+// Las tarjetas de plan se pueden abrir también con el teclado.
+$("#app-content").addEventListener("keydown", event => {
+  if ((event.key === "Enter" || event.key === " ") &&
+      event.target.matches('[role="button"][data-action]')) {
+    event.preventDefault();
+    event.target.click();
+  }
+});
+
+// Búsqueda de ejercicios y edición de la tabla del plan.
+$("#app-content").addEventListener("input", event => {
+  const target = event.target;
+  if (target.id === "plan-search-text") {
+    planSearch.text = target.value;
+    refreshPlanSearch();
+    return;
+  }
+  if (target.dataset.field && planDraft) {
+    const item = planDraft.items[Number(target.dataset.index)];
+    if (item) item[target.dataset.field] = target.value;
+  }
+});
+
+$("#app-content").addEventListener("change", event => {
+  const target = event.target;
+  if (target.id === "plan-search-category") {
+    planSearch.category = target.value;
+    refreshPlanSearch();
+  }
+  if (target.id === "plan-search-muscle") {
+    planSearch.muscle = target.value;
+    refreshPlanSearch();
+  }
+});
+
+function handleAction(action, id, date, button = null) {
+  const fromManage = button?.dataset.from === "manage";
+
   switch (action) {
     case "new-exercise": exerciseForm(); break;
     case "edit-exercise": {
@@ -767,45 +1365,130 @@ function handleAction(action, id, date) {
       selectedCategory = "";
       render();
       break;
+
+    // Categorías
     case "new-category":
-      categoryForm();
+      taxonomyForm("category", {}, fromManage ? "manage" : "");
       break;
     case "new-category-from-exercise":
-      categoryForm();
+      exerciseDraft = captureExerciseDraft();
+      taxonomyForm("category", {}, "exercise");
       break;
     case "edit-category": {
       const cat = state.categories.find(c => c.id === id);
-      if (cat) categoryForm(cat);
+      if (cat) taxonomyForm("category", cat, fromManage ? "manage" : "");
       break;
     }
     case "manage-categories":
-      manageCategories();
+      manageTaxonomy("category");
       break;
     case "delete-category":
-      if (confirm("¿Eliminar esta categoría? Los ejercicios no se borrarán, solo perderán esta asignación.")) {
-        state.categories = state.categories.filter(c => c.id !== id);
-        state.exercises.forEach(ex => {
-          ex.categories = (ex.categories || []).filter(catId => catId !== id);
-        });
-        if (selectedCategory === id) selectedCategory = "";
-        saveState();
-        manageCategories();
-        notify("Categoría eliminada.");
-      }
+      deleteTaxonomy("category", id);
       break;
+
+    // Grupos musculares
+    case "new-muscle":
+      taxonomyForm("muscle", {}, fromManage ? "manage" : "");
+      break;
+    case "new-muscle-from-exercise":
+      exerciseDraft = captureExerciseDraft();
+      taxonomyForm("muscle", {}, "exercise");
+      break;
+    case "edit-muscle": {
+      const group = state.muscleGroups.find(m => m.id === id);
+      if (group) taxonomyForm("muscle", group, fromManage ? "manage" : "");
+      break;
+    }
+    case "manage-muscles":
+      manageTaxonomy("muscle");
+      break;
+    case "delete-muscle":
+      deleteTaxonomy("muscle", id);
+      break;
+
+    case "back-to-exercise": {
+      const draft = exerciseDraft;
+      exerciseDraft = null;
+      if (draft) exerciseForm(draft);
+      else closeModal();
+      break;
+    }
+
+    // Planes
     case "new-plan": planForm(); break;
+    case "open-plan":
+      stopPlanEditing();
+      selectedPlanId = id;
+      render();
+      scrollToContent();
+      break;
+    case "back-plans":
+      if (!confirmDiscardPlan()) return;
+      selectedPlanId = "";
+      render();
+      break;
     case "edit-plan": {
       const plan = state.plans.find(x => x.id === id);
       if (plan) planForm(plan);
       break;
     }
+    case "edit-plan-exercises":
+      startPlanEditing(id);
+      break;
+    case "cancel-plan-edit":
+      stopPlanEditing();
+      render();
+      break;
+    case "save-plan-exercises":
+      savePlanDraft();
+      break;
+    case "add-plan-exercise":
+      addExerciseToDraft(id);
+      break;
+    case "remove-plan-item": {
+      if (!planDraft) return;
+      const [removed] = planDraft.items.splice(Number(id), 1);
+      if (removed) setResultButtonState(removed.exerciseId, false);
+      refreshPlanEditor();
+      break;
+    }
+    case "move-plan-item": {
+      if (!planDraft) return;
+      const from = Number(id);
+      const to = button?.dataset.dir === "up" ? from - 1 : from + 1;
+      if (to < 0 || to >= planDraft.items.length) return;
+      const items = planDraft.items;
+      [items[from], items[to]] = [items[to], items[from]];
+      refreshPlanEditor();
+      break;
+    }
+    case "clear-plan-search":
+      planSearch = { text: "", category: "", muscle: "" };
+      $("#plan-search-text").value = "";
+      $("#plan-search-category").value = "";
+      $("#plan-search-muscle").value = "";
+      refreshPlanSearch();
+      break;
+    case "use-collage":
+      updateSelectedImage("");
+      break;
     case "delete-plan":
       if (confirm("¿Eliminar este plan? Las sesiones ya registradas se conservarán.")) {
         state.plans = state.plans.filter(x => x.id !== id);
+        if (selectedPlanId === id) {
+          selectedPlanId = "";
+          stopPlanEditing();
+        }
         saveState(); render(); notify("Plan eliminado.");
       }
       break;
-    case "start-plan": sessionForm(id, today()); break;
+    case "start-plan": {
+      const plan = state.plans.find(p => p.id === id);
+      if (plan && !plan.items.length) return notify("Este plan todavía no tiene ejercicios.");
+      sessionForm(id, today());
+      break;
+    }
+
     case "calendar-day": openDay(date); break;
     case "free-workout": sessionForm("", date); break;
     case "prev-month":
@@ -872,30 +1555,8 @@ $("#modal-content").addEventListener("submit", event => {
   const form = event.target;
   const data = new FormData(form);
 
-  if (form.id === "category-form") {
-    const name = String(data.get("name") || "").trim();
-    if (!name) return;
-
-    const duplicate = state.categories.some(c =>
-      c.name.toLocaleLowerCase("es") === name.toLocaleLowerCase("es") &&
-      c.id !== form.dataset.id
-    );
-    if (duplicate) return notify("Ya existe una categoría con ese nombre.");
-
-    const existing = state.categories.find(c => c.id === form.dataset.id);
-    if (existing) existing.name = name;
-    else state.categories.push({ id: uid(), name });
-
-    saveState();
-
-    if (form.dataset.returnToExercise === "true") {
-      closeModal();
-      exerciseForm();
-    } else {
-      closeModal();
-      if (currentView === "exercises") render();
-      notify("Categoría guardada.");
-    }
+  if (form.id === "taxonomy-form") {
+    saveTaxonomy(form, data);
   }
 
   if (form.id === "exercise-form") {
@@ -909,13 +1570,18 @@ $("#modal-content").addEventListener("submit", event => {
       id: existing?.id || uid(),
       name,
       muscles,
-      muscle: muscles[0] || "General",
+      muscle: muscles[0] || "",
       categories: data.getAll("categories").map(String),
       image: selectedImage || ""
     };
 
     if (existing) Object.assign(existing, exercise);
     else state.exercises.push(exercise);
+
+    // Mantener actualizado el nombre guardado en los planes.
+    state.plans.forEach(plan => plan.items.forEach(item => {
+      if (item.exerciseId === exercise.id) item.name = exercise.name;
+    }));
 
     saveState(); closeModal(); render(); notify("Ejercicio guardado.");
   }
@@ -924,24 +1590,21 @@ $("#modal-content").addEventListener("submit", event => {
     const name = String(data.get("name") || "").trim();
     if (!name) return;
 
-    const items = [...form.querySelectorAll('input[name="exercise"]:checked')].map(input => {
-      const exercise = state.exercises.find(x => x.id === input.value);
-      return {
-        exerciseId: input.value,
-        name: exercise?.name || "Ejercicio",
-        sets: Math.max(1, Number(data.get(`sets-${input.value}`)) || 3),
-        reps: String(data.get(`reps-${input.value}`) || "10"),
-        weight: String(data.get(`weight-${input.value}`) || "")
-      };
-    });
-
+    const image = selectedImage || "";
     const existing = state.plans.find(x => x.id === form.dataset.id);
-    const plan = { id: existing?.id || uid(), name, items };
 
-    if (existing) Object.assign(existing, plan);
-    else state.plans.push(plan);
-
-    saveState(); closeModal(); render(); notify("Plan guardado.");
+    if (existing) {
+      existing.name = name;
+      existing.image = image;
+      saveState(); closeModal(); render(); notify("Plan actualizado.");
+    } else {
+      const plan = { id: uid(), name, image, items: [] };
+      state.plans.push(plan);
+      saveState();
+      closeModal();
+      startPlanEditing(plan.id);
+      notify("Plan creado. Ahora busca y añade sus ejercicios.");
+    }
   }
 
   if (form.id === "session-form") {
@@ -981,6 +1644,45 @@ $("#modal-content").addEventListener("submit", event => {
     saveState(); closeModal(); setView("calendar"); notify("Sesión guardada en tu historial.");
   }
 });
+
+// ---------- MODO CLARO / OSCURO ----------
+
+const THEME_KEY = "andrifit-theme";
+const systemDark = window.matchMedia ? matchMedia("(prefers-color-scheme: dark)") : null;
+
+function savedTheme() {
+  try { return localStorage.getItem(THEME_KEY); } catch (_) { return null; }
+}
+
+function applyTheme(theme, save = false) {
+  document.documentElement.dataset.theme = theme;
+  const meta = $('meta[name="theme-color"]');
+  if (meta) meta.content = theme === "dark" ? "#11161d" : "#f5f6f8";
+
+  const button = $("#theme-toggle");
+  if (button) {
+    const label = theme === "dark" ? "Cambiar a modo claro" : "Cambiar a modo oscuro";
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  }
+
+  if (save) {
+    try { localStorage.setItem(THEME_KEY, theme); } catch (_) {}
+  }
+}
+
+$("#theme-toggle")?.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  applyTheme(next, true);
+});
+
+// Si no ha elegido un tema, seguir el del dispositivo.
+systemDark?.addEventListener?.("change", event => {
+  const stored = savedTheme();
+  if (stored !== "light" && stored !== "dark") applyTheme(event.matches ? "dark" : "light");
+});
+
+applyTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
 
 // ---------- INICIO ----------
 
