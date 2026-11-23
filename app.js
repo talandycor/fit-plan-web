@@ -146,15 +146,31 @@ let planFormItems = [];
 // Borrador del ejercicio mientras se crea una categoría/grupo desde su formulario.
 let exerciseDraft = null;
 
+// Sesión que se está editando (copia; no se guarda hasta pulsar Guardar).
+let sessionDraft = null;
+
+// Selección de las gráficas de progreso.
+let progressExerciseId = "";
+let progressPlanId = "";
+
 function loadState() {
   return normalizeState({ exercises: [], plans: [], sessions: [] });
 }
 
+// Convierte el peso a número (admite "42,5" y "42.5").
+function parseWeight(value) {
+  const n = Number(String(value ?? "").replace(",", ".").trim());
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+const formatWeight = n => String(Math.round(n * 100) / 100).replace(".", ",");
+
+// Peso máximo de un ejercicio en TODO el historial (planes y entrenamientos libres).
 function maxRecordedWeight(exerciseId) {
   return Math.max(0, ...state.sessions.flatMap(session =>
     (session.exercises || [])
       .filter(ex => ex.exerciseId === exerciseId)
-      .map(ex => Number(ex.weight) || 0)
+      .map(ex => parseWeight(ex.weight))
   ));
 }
 
@@ -183,6 +199,7 @@ function openModal(html) {
 }
 
 function closeModal() {
+  sessionDraft = null;
   $("#modal").close();
   $("#modal-content").innerHTML = "";
   selectedImage = "";
@@ -775,6 +792,14 @@ function renderPlanDetail(plan) {
   `;
 }
 
+// Peso máximo registrado; si aún no hay registros, el peso objetivo del plan.
+function weightCellHTML(item) {
+  const max = maxRecordedWeight(item.exerciseId);
+  if (max) return `<strong>${formatWeight(max)} kg</strong>`;
+  if (item.weight) return `${escapeHTML(item.weight)} kg <small class="muted-cell">(objetivo)</small>`;
+  return `<span class="muted-cell">Sin registros</span>`;
+}
+
 function renderPlanTable(plan) {
   if (!plan.items.length) {
     return emptyState("▤", "Este plan no tiene ejercicios",
@@ -794,7 +819,7 @@ function renderPlanTable(plan) {
       </td>
       <td>${escapeHTML(item.sets)}</td>
       <td>${escapeHTML(item.reps)}</td>
-      <td>${item.weight ? `${escapeHTML(item.weight)} kg` : `<span class="muted-cell">Por definir</span>`}</td>
+      <td>${weightCellHTML(item)}</td>
     </tr>`;
   }).join("");
 
@@ -803,7 +828,7 @@ function renderPlanTable(plan) {
       <div class="table-scroll">
         <table class="plan-table">
           <thead>
-            <tr><th class="col-num">#</th><th>Ejercicio</th><th>Series</th><th>Reps</th><th>Peso</th></tr>
+            <tr><th class="col-num">#</th><th>Ejercicio</th><th>Series</th><th>Reps</th><th>Peso máx.</th></tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>
@@ -836,7 +861,7 @@ function planEditorTableHTML() {
         <div class="plan-table-ex">
           <img src="${escapeHTML(ex?.image || placeholder)}" alt="" onerror="this.src='${placeholder}'">
           <span>${i + 1}. ${escapeHTML(ex?.name || item.name || "Ejercicio eliminado")}
-            <small>${max ? `Máximo registrado: ${max} kg` : "Sin pesos registrados todavía"}</small>
+            <small>${max ? `Máximo registrado: ${formatWeight(max)} kg` : "Sin pesos registrados todavía"}</small>
           </span>
         </div>
       </td>
@@ -848,9 +873,9 @@ function planEditorTableHTML() {
         <input class="table-input" type="text" value="${escapeHTML(item.reps)}"
           data-index="${i}" data-field="reps" aria-label="Repeticiones">
       </td>
-      <td data-label="Peso (kg)">
+      <td data-label="Peso objetivo (kg)">
         <input class="table-input" type="number" min="0" step="0.5" inputmode="decimal"
-          value="${escapeHTML(item.weight)}" placeholder="${max ? `Máx. ${max}` : "Kg"}"
+          value="${escapeHTML(item.weight)}" placeholder="${max ? `Máx. ${formatWeight(max)}` : "Kg"}"
           data-index="${i}" data-field="weight" aria-label="Peso en kg">
       </td>
       <td class="col-remove">
@@ -865,7 +890,7 @@ function planEditorTableHTML() {
       <div class="table-scroll">
         <table class="plan-table editable">
           <thead>
-            <tr><th>Orden</th><th>Ejercicio</th><th>Series</th><th>Reps</th><th>Peso (kg)</th><th></th></tr>
+            <tr><th>Orden</th><th>Ejercicio</th><th>Series</th><th>Reps</th><th>Peso objetivo (kg)</th><th></th></tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>
@@ -904,7 +929,7 @@ function renderPlanEditor() {
     </div>
 
     <h3 class="editor-section-title">Ejercicios del plan</h3>
-    <p class="help editor-section-help">Usa las flechas para cambiar el orden y ajusta series, repeticiones y peso.</p>
+    <p class="help editor-section-help">Usa las flechas para cambiar el orden y ajusta series y repeticiones. El peso objetivo solo se usa mientras no haya pesos registrados; después se muestra siempre el máximo de tu historial.</p>
     <div id="plan-editor-table">${planEditorTableHTML()}</div>
 
     <div class="modal-actions">
@@ -1000,13 +1025,12 @@ function addExerciseToDraft(exerciseId) {
   if (!planDraft || planDraft.items.some(i => i.exerciseId === exerciseId)) return;
   const ex = state.exercises.find(e => e.id === exerciseId);
   if (!ex) return;
-  const max = maxRecordedWeight(ex.id);
   planDraft.items.push({
     exerciseId: ex.id,
     name: ex.name,
     sets: 3,
     reps: "10",
-    weight: max ? String(max) : ""
+    weight: ""
   });
   setResultButtonState(ex.id, true);
   refreshPlanEditor();
@@ -1100,7 +1124,8 @@ function sessionForm(planId, date) {
             <div class="field full">
               <label>Peso utilizado (kg)</label>
               <input type="number" min="0" step="0.5" name="weight-${item.exerciseId}"
-                value="${escapeHTML(item.weight || (maxRecordedWeight(item.exerciseId) || ""))}" placeholder="Ej. 40">
+                value="${escapeHTML(maxRecordedWeight(item.exerciseId) || item.weight || "")}" placeholder="Ej. 40">
+              <small class="help">${maxRecordedWeight(item.exerciseId) ? `Máximo registrado: ${formatWeight(maxRecordedWeight(item.exerciseId))} kg` : "Sin pesos registrados todavía"}</small>
             </div>
           </div>
         </div>
@@ -1161,16 +1186,126 @@ function viewSession(id) {
         <img class="session-exercise-image" src="${escapeHTML(ex.image || placeholder)}" alt="">
         <div class="session-exercise-content">
         <strong>${escapeHTML(ex.name)}</strong>
-        <p class="muted">${ex.sets} series × ${escapeHTML(ex.reps)} repeticiones
+        <p class="muted">${escapeHTML(ex.sets)} series × ${escapeHTML(ex.reps)} repeticiones
         · ${ex.weight ? `${escapeHTML(ex.weight)} kg` : "Sin peso registrado"}</p>
         </div>
       </div>`).join("")}
     ${session.notes ? `<p class="muted" style="margin-top:14px">Notas: ${escapeHTML(session.notes)}</p>` : ""}
     <div class="modal-actions">
-      <button class="btn ghost" data-action="close-modal">Cerrar</button>
       <button class="btn danger" data-action="delete-session" data-id="${session.id}">Eliminar sesión</button>
+      <button class="btn ghost" data-action="close-modal">Cerrar</button>
+      <button class="btn" data-action="edit-session" data-id="${session.id}">Editar sesión</button>
     </div>
   `);
+}
+
+// ---------- EDITAR UNA SESIÓN YA REGISTRADA ----------
+
+function editSession(id) {
+  const session = state.sessions.find(s => s.id === id);
+  if (!session) return notify("No se encuentra esa sesión.");
+  sessionDraft = clone(session);
+  renderSessionEditor();
+}
+
+function renderSessionEditor() {
+  const draft = sessionDraft;
+  if (!draft) return;
+
+  const rows = draft.exercises.map((ex, i) => {
+    const libraryEx = state.exercises.find(e => e.id === ex.exerciseId);
+    const max = maxRecordedWeight(ex.exerciseId);
+    return `<div class="session-row session-exercise">
+      <img class="session-exercise-image" src="${escapeHTML(libraryEx?.image || ex.image || placeholder)}" alt="">
+      <div class="session-exercise-content">
+        <div class="session-edit-title">
+          <strong>${escapeHTML(libraryEx?.name || ex.name)}</strong>
+          <button type="button" class="btn danger small" data-action="remove-session-exercise" data-id="${i}"
+            aria-label="Quitar de la sesión">✕</button>
+        </div>
+        <div class="picker-config">
+          <label class="mini-field">Series
+            <input type="number" min="0" inputmode="numeric" value="${escapeHTML(ex.sets)}"
+              data-sindex="${i}" data-sfield="sets">
+          </label>
+          <label class="mini-field">Reps
+            <input type="text" value="${escapeHTML(ex.reps)}" data-sindex="${i}" data-sfield="reps">
+          </label>
+          <label class="mini-field">Peso (kg)
+            <input type="number" min="0" step="0.5" inputmode="decimal" value="${escapeHTML(ex.weight)}"
+              placeholder="${max ? `Máx. ${formatWeight(max)}` : "Kg"}" data-sindex="${i}" data-sfield="weight">
+          </label>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  const included = new Set(draft.exercises.map(e => e.exerciseId));
+  const available = state.exercises.filter(ex => !included.has(ex.id)).sort(byName);
+
+  openModal(`
+    <h2>Editar entrenamiento</h2>
+    <p class="muted">${escapeHTML(draft.planName)}</p>
+    <form id="session-edit-form">
+      <div class="field">
+        <label for="session-edit-date">Fecha</label>
+        <input id="session-edit-date" type="date" required value="${escapeHTML(draft.date)}" data-session-field="date">
+      </div>
+
+      <span class="field-label">Ejercicios realizados</span>
+      ${rows || `<p class="muted">La sesión no tiene ejercicios. Añade al menos uno.</p>`}
+
+      ${available.length ? `
+        <div class="session-add-row">
+          <select id="session-add-select" aria-label="Ejercicio para añadir">
+            ${available.map(ex => `<option value="${ex.id}">${escapeHTML(ex.name)}</option>`).join("")}
+          </select>
+          <button type="button" class="btn secondary" data-action="add-session-exercise">+ Añadir ejercicio</button>
+        </div>` : ""}
+
+      <div class="field" style="margin-top:16px">
+        <label for="session-edit-notes">Notas de la sesión (opcional)</label>
+        <textarea id="session-edit-notes" rows="2" data-session-field="notes"
+          placeholder="Sensaciones, observaciones...">${escapeHTML(draft.notes || "")}</textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" data-action="cancel-session-edit" data-id="${draft.id}">Cancelar</button>
+        <button class="btn" type="submit">Guardar cambios</button>
+      </div>
+    </form>
+  `);
+}
+
+function saveSessionDraft() {
+  const draft = sessionDraft;
+  const session = state.sessions.find(s => s.id === draft?.id);
+  if (!session) {
+    sessionDraft = null;
+    closeModal();
+    return notify("No se encuentra esa sesión.");
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(draft.date || "")) return notify("Elige una fecha válida.");
+  if (!draft.exercises.length) return notify("La sesión debe tener al menos un ejercicio.");
+
+  session.date = draft.date;
+  session.notes = String(draft.notes || "");
+  session.exercises = draft.exercises.map(ex => {
+    const libraryEx = state.exercises.find(e => e.id === ex.exerciseId);
+    return {
+      exerciseId: ex.exerciseId,
+      name: libraryEx?.name || ex.name || "Ejercicio",
+      image: libraryEx?.image || ex.image || "",
+      sets: Math.max(0, Number(ex.sets) || 0),
+      reps: String(ex.reps ?? "").trim(),
+      weight: String(ex.weight ?? "").trim().replace(",", ".")
+    };
+  });
+
+  sessionDraft = null;
+  saveState();
+  closeModal();
+  render();
+  notify("Entrenamiento actualizado.");
 }
 
 // ---------- CALENDARIO Y PROGRESO ----------
@@ -1218,7 +1353,10 @@ function renderCalendar() {
       <div class="session-row">
         <strong>${escapeHTML(s.planName)}</strong>
         <p class="muted">${formatDate(s.date)} · ${s.exercises.length} ejercicios</p>
-        <button class="btn ghost small" data-action="view-session" data-id="${s.id}">Ver sesión</button>
+        <div class="session-row-actions">
+          <button class="btn ghost small" data-action="view-session" data-id="${s.id}">Ver sesión</button>
+          <button class="btn secondary small" data-action="edit-session" data-id="${s.id}">Editar</button>
+        </div>
       </div>`).join("");
 
   return `
@@ -1242,49 +1380,331 @@ function renderCalendar() {
   `;
 }
 
+// ---------- PROGRESO: DATOS Y GRÁFICAS ----------
+
+const SERIES_COUNT = 8;   // colores disponibles para las líneas de un plan
+let chartRegistry = {};   // datos de cada gráfica para el tooltip
+let chartCounter = 0;
+
+const shortDate = (date, withYear = false) =>
+  new Date(`${date}T12:00:00`).toLocaleDateString("es-ES", withYear
+    ? { day: "numeric", month: "short", year: "2-digit" }
+    : { day: "numeric", month: "short" }).replace(".", "");
+
+// Peso máximo por fecha de un ejercicio dentro de unas sesiones.
+function maxByDate(sessions, exerciseId) {
+  const byDate = new Map();
+  sessions.forEach(session => (session.exercises || []).forEach(ex => {
+    if (ex.exerciseId !== exerciseId) return;
+    const w = parseWeight(ex.weight);
+    if (!w) return;
+    byDate.set(session.date, Math.max(byDate.get(session.date) || 0, w));
+  }));
+  return [...byDate.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, value]) => ({ date, value }));
+}
+
+function exerciseDisplayName(exerciseId) {
+  const ex = state.exercises.find(e => e.id === exerciseId);
+  if (ex) return ex.name;
+  for (const s of state.sessions) {
+    const rec = (s.exercises || []).find(e => e.exerciseId === exerciseId);
+    if (rec) return rec.name;
+  }
+  return "Ejercicio";
+}
+
+function niceScale(max) {
+  if (max <= 0) return { top: 10, step: 2.5 };
+  const raw = max / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+  return { top: Math.ceil(max / step) * step, step };
+}
+
+function chartWidth() {
+  const content = $("#app-content");
+  return Math.max(280, Math.round((content?.clientWidth || 640) - 38));
+}
+
+// Gráfica de líneas en SVG. series: [{ name, color, points: [{date, value}] }]
+function lineChartHTML(series, { height = 250, label = "Peso máximo (kg)" } = {}) {
+  const withData = series.filter(s => s.points.length);
+  if (!withData.length) {
+    return `<p class="muted chart-empty">Todavía no hay pesos registrados para mostrar la gráfica.</p>`;
+  }
+
+  const id = `chart-${++chartCounter}`;
+  const W = chartWidth();
+  const multi = withData.length > 1;
+  const directLabels = multi && withData.length <= 4 && W >= 520;
+  const m = { top: 16, right: directLabels ? 112 : 18, bottom: 30, left: 42 };
+  const pw = W - m.left - m.right;
+  const ph = height - m.top - m.bottom;
+
+  const dates = [...new Set(withData.flatMap(s => s.points.map(p => p.date)))].sort();
+  const t = d => new Date(`${d}T12:00:00`).getTime();
+  const t0 = t(dates[0]);
+  const t1 = t(dates[dates.length - 1]);
+  const x = d => m.left + (t1 === t0 ? pw / 2 : ((t(d) - t0) / (t1 - t0)) * pw);
+
+  const maxValue = Math.max(...withData.flatMap(s => s.points.map(p => p.value)));
+  const { top, step } = niceScale(maxValue);
+  const y = v => m.top + ph - (v / top) * ph;
+
+  const multiYear = dates[0].slice(0, 4) !== dates[dates.length - 1].slice(0, 4);
+
+  // Líneas de referencia y eje Y
+  let grid = "";
+  for (let v = 0; v <= top + 1e-9; v += step) {
+    grid += `<line class="chart-grid" x1="${m.left}" x2="${m.left + pw}" y1="${y(v)}" y2="${y(v)}"></line>
+      <text class="chart-axis" x="${m.left - 8}" y="${y(v) + 4}" text-anchor="end">${formatWeight(v)}</text>`;
+  }
+
+  // Etiquetas de fecha (máximo 5, sin solaparse)
+  const maxTicks = Math.max(2, Math.min(5, Math.floor(pw / 70)));
+  const tickIdx = dates.length <= maxTicks
+    ? dates.map((_, i) => i)
+    : [...new Set(Array.from({ length: maxTicks }, (_, i) => Math.round(i * (dates.length - 1) / (maxTicks - 1))))];
+  const xTicks = tickIdx.map(i => {
+    const d = dates[i];
+    const anchor = dates.length === 1 ? "middle" : i === 0 ? "start" : i === dates.length - 1 ? "end" : "middle";
+    return `<text class="chart-axis" x="${x(d)}" y="${height - 8}" text-anchor="${anchor}">${shortDate(d, multiYear)}</text>`;
+  }).join("");
+
+  // Series
+  const lines = withData.map(s => {
+    const path = s.points.map((p, i) => `${i ? "L" : "M"}${x(p.date).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ");
+    return `<g style="--c:${s.color}">
+      ${s.points.length > 1 ? `<path class="chart-line" d="${path}"></path>` : ""}
+      ${s.points.map(p => `<circle class="chart-dot" cx="${x(p.date).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="4"></circle>`).join("")}
+    </g>`;
+  }).join("");
+
+  // Etiquetas directas al final de cada línea (separadas para que no se pisen)
+  let labels = "";
+  if (directLabels) {
+    const ends = withData.map(s => {
+      const last = s.points[s.points.length - 1];
+      return { name: s.name, color: s.color, y: y(last.value) + 4 };
+    }).sort((a, b) => a.y - b.y);
+    for (let i = 1; i < ends.length; i++) {
+      if (ends[i].y - ends[i - 1].y < 14) ends[i].y = ends[i - 1].y + 14;
+    }
+    labels = ends.map(e => {
+      const name = e.name.length > 15 ? `${e.name.slice(0, 14)}…` : e.name;
+      return `<text class="chart-direct-label" x="${m.left + pw + 10}" y="${e.y}">${escapeHTML(name)}</text>`;
+    }).join("");
+  }
+
+  chartRegistry[id] = {
+    dates,
+    xs: dates.map(x),
+    width: W,
+    series: withData.map(s => ({
+      name: s.name, color: s.color,
+      values: new Map(s.points.map(p => [p.date, p.value]))
+    }))
+  };
+
+  const legend = multi ? `<div class="chart-legend">
+    ${withData.map(s => `<span><i style="background:${s.color}"></i>${escapeHTML(s.name)}</span>`).join("")}
+  </div>` : "";
+
+  const table = `<details class="chart-table">
+    <summary>Ver datos en tabla</summary>
+    <div class="table-scroll">
+      <table class="plan-table">
+        <thead><tr><th>Fecha</th>${withData.map(s => `<th>${escapeHTML(s.name)}</th>`).join("")}</tr></thead>
+        <tbody>${[...dates].reverse().map(d => `<tr><td>${formatDate(d)}</td>${withData.map(s => {
+          const v = s.points.find(p => p.date === d)?.value;
+          return `<td>${v ? `${formatWeight(v)} kg` : "—"}</td>`;
+        }).join("")}</tr>`).join("")}</tbody>
+      </table>
+    </div>
+  </details>`;
+
+  return `
+    ${legend}
+    <div class="chart-wrap" data-chart-wrap="${id}">
+      <p class="chart-unit">${label}</p>
+      <svg class="chart" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" role="img"
+        aria-label="${escapeHTML(label)} por fecha">
+        ${grid}
+        <line class="chart-baseline" x1="${m.left}" x2="${m.left + pw}" y1="${y(0)}" y2="${y(0)}"></line>
+        ${xTicks}
+        <line class="chart-crosshair" x1="0" x2="0" y1="${m.top}" y2="${m.top + ph}" style="display:none"></line>
+        ${lines}
+        ${labels}
+        <rect class="chart-overlay" data-chart="${id}" x="${m.left - 10}" y="${m.top}"
+          width="${pw + 20}" height="${ph}" fill="transparent"></rect>
+      </svg>
+      <div class="chart-tip" role="status"></div>
+    </div>
+    ${table}
+  `;
+}
+
+// Tooltip con línea vertical: muestra el valor de cada serie en la fecha más cercana.
+function updateChartTip(event) {
+  const overlay = event.target.closest?.(".chart-overlay");
+  if (!overlay) return;
+  const data = chartRegistry[overlay.dataset.chart];
+  const wrap = overlay.closest(".chart-wrap");
+  const svg = overlay.ownerSVGElement;
+  if (!data || !wrap || !svg) return;
+
+  const box = svg.getBoundingClientRect();
+  const scale = box.width / data.width;
+  const px = (event.clientX - box.left) / scale;
+
+  let index = 0;
+  data.xs.forEach((xv, i) => {
+    if (Math.abs(xv - px) < Math.abs(data.xs[index] - px)) index = i;
+  });
+
+  const date = data.dates[index];
+  const cross = $(".chart-crosshair", svg);
+  cross.setAttribute("x1", data.xs[index]);
+  cross.setAttribute("x2", data.xs[index]);
+  cross.style.display = "";
+
+  const rows = data.series
+    .filter(s => s.values.has(date))
+    .map(s => `<div><i style="background:${s.color}"></i><span>${escapeHTML(s.name)}</span>
+      <strong>${formatWeight(s.values.get(date))} kg</strong></div>`).join("");
+
+  const tip = $(".chart-tip", wrap);
+  tip.innerHTML = `<b>${formatDate(date)}</b>${rows}`;
+  tip.classList.add("show");
+
+  const svgLeft = box.left - wrap.getBoundingClientRect().left;
+  const left = svgLeft + data.xs[index] * scale;
+  const tipWidth = tip.offsetWidth;
+  const wrapWidth = wrap.clientWidth;
+  tip.style.left = `${Math.min(Math.max(0, left + 12 + tipWidth > wrapWidth ? left - tipWidth - 12 : left + 12), wrapWidth - tipWidth)}px`;
+}
+
+function hideChartTip(event) {
+  const overlay = event.target.closest?.(".chart-overlay");
+  if (!overlay) return;
+  const wrap = overlay.closest(".chart-wrap");
+  $(".chart-tip", wrap)?.classList.remove("show");
+  const cross = $(".chart-crosshair", overlay.ownerSVGElement);
+  if (cross) cross.style.display = "none";
+}
+
 function renderProgress() {
+  chartRegistry = {};
   const sessions = [...state.sessions].sort((a,b) => b.date.localeCompare(a.date));
   const exerciseCount = new Set(sessions.flatMap(s => s.exercises.map(e => e.exerciseId))).size;
   const totalExercises = sessions.reduce((sum, s) => sum + s.exercises.length, 0);
 
-  const progress = {};
-  sessions.forEach(session => {
-    session.exercises.forEach(ex => {
-      if (!progress[ex.exerciseId]) progress[ex.exerciseId] = { name: ex.name, records: [] };
-      progress[ex.exerciseId].records.push({
-        date: session.date,
-        weight: Number(ex.weight) || 0,
-        reps: ex.reps,
-        sets: ex.sets
-      });
-    });
-  });
+  // --- Por ejercicio ---
+  const exerciseIds = [...new Set(sessions.flatMap(s =>
+    s.exercises.filter(e => parseWeight(e.weight)).map(e => e.exerciseId)))];
+  const exerciseOptions = exerciseIds
+    .map(id => ({ id, name: exerciseDisplayName(id) }))
+    .sort(byName);
+  if (!exerciseOptions.some(o => o.id === progressExerciseId)) {
+    progressExerciseId = exerciseOptions[0]?.id || "";
+  }
 
-  const rows = Object.values(progress).map(item => {
-    const records = item.records;
-    const best = Math.max(0, ...records.map(r => r.weight));
-    const latest = records[0];
-    return `<div class="progress-item">
-      <strong>${escapeHTML(item.name)}</strong>
-      <p>Último registro: ${latest.weight || "Sin peso"}${latest.weight ? " kg" : ""}
-      · ${latest.sets} series × ${latest.reps} repeticiones</p>
-      <p>Mejor peso registrado: ${best ? `${best} kg` : "Sin datos de peso"} · ${records.length} registros</p>
-    </div>`;
-  }).join("");
+  let exerciseSection = `<p class="muted">Cuando registres pesos en tus entrenamientos, aquí verás su evolución.</p>`;
+  if (progressExerciseId) {
+    const points = maxByDate(state.sessions, progressExerciseId);
+    const best = Math.max(...points.map(p => p.value));
+    const last = points[points.length - 1];
+    const first = points[0];
+    const diff = last.value - first.value;
+    exerciseSection = `
+      <select id="progress-exercise" class="progress-select" aria-label="Elegir ejercicio">
+        ${exerciseOptions.map(o => `<option value="${o.id}" ${o.id === progressExerciseId ? "selected" : ""}>${escapeHTML(o.name)}</option>`).join("")}
+      </select>
+      <div class="mini-stats">
+        <div><strong>${formatWeight(best)} kg</strong><span>Peso máximo</span></div>
+        <div><strong>${formatWeight(last.value)} kg</strong><span>Último · ${shortDate(last.date)}</span></div>
+        <div><strong>${diff > 0 ? "+" : ""}${formatWeight(diff)} kg</strong><span>Desde el primer registro</span></div>
+      </div>
+      ${lineChartHTML([{ name: exerciseDisplayName(progressExerciseId), color: "var(--accent)", points }])}
+    `;
+  }
+
+  // --- Por plan ---
+  const planGroups = new Map();
+  state.sessions.forEach(s => {
+    if (!s.planId) return;
+    if (!planGroups.has(s.planId)) planGroups.set(s.planId, []);
+    planGroups.get(s.planId).push(s);
+  });
+  const planOptions = [...planGroups.entries()]
+    .filter(([, list]) => list.some(s => s.exercises.some(e => parseWeight(e.weight))))
+    .map(([id, list]) => {
+      const plan = state.plans.find(p => p.id === id);
+      return { id, name: plan ? plan.name : `${list[0].planName} (eliminado)` };
+    })
+    .sort(byName);
+  if (!planOptions.some(o => o.id === progressPlanId)) progressPlanId = planOptions[0]?.id || "";
+
+  let planSection = `<p class="muted">Cuando registres entrenamientos con un plan, aquí verás la evolución de sus ejercicios.</p>`;
+  if (progressPlanId) {
+    const planSessions = planGroups.get(progressPlanId);
+    const plan = state.plans.find(p => p.id === progressPlanId);
+    const order = [
+      ...(plan?.items || []).map(i => i.exerciseId),
+      ...planSessions.flatMap(s => s.exercises.map(e => e.exerciseId))
+    ];
+    const ids = [...new Set(order)].filter(id => maxByDate(planSessions, id).length);
+    const shown = ids.slice(0, SERIES_COUNT);
+    const series = shown.map((id, i) => ({
+      name: exerciseDisplayName(id),
+      color: `var(--series-${i + 1})`,
+      points: maxByDate(planSessions, id)
+    }));
+
+    const summary = series.map(s => {
+      const best = Math.max(...s.points.map(p => p.value));
+      return `<tr><td><i class="swatch" style="background:${s.color}"></i>${escapeHTML(s.name)}</td>
+        <td><strong>${formatWeight(best)} kg</strong></td>
+        <td>${formatWeight(s.points[s.points.length - 1].value)} kg</td>
+        <td>${s.points.length}</td></tr>`;
+    }).join("");
+
+    planSection = `
+      <select id="progress-plan" class="progress-select" aria-label="Elegir plan">
+        ${planOptions.map(o => `<option value="${o.id}" ${o.id === progressPlanId ? "selected" : ""}>${escapeHTML(o.name)}</option>`).join("")}
+      </select>
+      <p class="help">${plural(planSessions.length, "sesión registrada", "sesiones registradas")} con este plan · peso máximo de cada ejercicio en cada fecha.</p>
+      ${lineChartHTML(series)}
+      ${ids.length > SERIES_COUNT ? `<p class="help">Se muestran los ${SERIES_COUNT} primeros ejercicios del plan.</p>` : ""}
+      <div class="table-scroll">
+        <table class="plan-table progress-summary">
+          <thead><tr><th>Ejercicio</th><th>Peso máx.</th><th>Último</th><th>Registros</th></tr></thead>
+          <tbody>${summary}</tbody>
+        </table>
+      </div>
+    `;
+  }
 
   return `
     <div class="section-head">
       <div><h2>Tu progreso</h2>
-      <p class="muted">Resumen de tus entrenamientos registrados.</p></div>
+      <p class="muted">Evolución del peso máximo levantado en cada fecha.</p></div>
     </div>
     <div class="stat-grid">
       <div class="stat"><strong>${sessions.length}</strong><span>Sesiones</span></div>
       <div class="stat"><strong>${exerciseCount}</strong><span>Ejercicios trabajados</span></div>
       <div class="stat"><strong>${totalExercises}</strong><span>Registros de ejercicio</span></div>
     </div>
-    <div class="card" style="padding:18px">
-      <h3>Evolución por ejercicio</h3>
-      ${rows || `<p class="muted">Cuando registres tus primeras sesiones, aquí aparecerá tu evolución.</p>`}
+    <div class="card progress-card">
+      <h3>Por ejercicio</h3>
+      ${exerciseSection}
+    </div>
+    <div class="card progress-card">
+      <h3>Por plan</h3>
+      ${planSection}
     </div>
   `;
 }
@@ -1301,6 +1721,17 @@ $("#modal-content").addEventListener("click", event => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
   handleAction(button.dataset.action, button.dataset.id, button.dataset.date, button);
+});
+
+$("#modal-content").addEventListener("input", event => {
+  const target = event.target;
+  if (!sessionDraft) return;
+  if (target.dataset.sessionField) {
+    sessionDraft[target.dataset.sessionField] = target.value;
+  } else if (target.dataset.sfield) {
+    const ex = sessionDraft.exercises[Number(target.dataset.sindex)];
+    if (ex) ex[target.dataset.sfield] = target.value;
+  }
 });
 
 // Las tarjetas de plan se pueden abrir también con el teclado.
@@ -1326,8 +1757,32 @@ $("#app-content").addEventListener("input", event => {
   }
 });
 
+$("#app-content").addEventListener("pointermove", updateChartTip);
+$("#app-content").addEventListener("pointerdown", updateChartTip);
+$("#app-content").addEventListener("pointerout", hideChartTip);
+
+let resizeTimer;
+let lastWidth = window.innerWidth;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (currentView === "progress" && window.innerWidth !== lastWidth) render();
+    lastWidth = window.innerWidth;
+  }, 200);
+});
+
 $("#app-content").addEventListener("change", event => {
   const target = event.target;
+  if (target.id === "progress-exercise") {
+    progressExerciseId = target.value;
+    render();
+    return;
+  }
+  if (target.id === "progress-plan") {
+    progressPlanId = target.value;
+    render();
+    return;
+  }
   if (target.id === "plan-search-category") {
     planSearch.category = target.value;
     refreshPlanSearch();
@@ -1498,6 +1953,30 @@ function handleAction(action, id, date, button = null) {
     case "calendar-today":
       calendarDate = new Date(); render(); break;
     case "view-session": viewSession(id); break;
+    case "edit-session": editSession(id); break;
+    case "cancel-session-edit": {
+      sessionDraft = null;
+      viewSession(id);
+      break;
+    }
+    case "remove-session-exercise":
+      if (!sessionDraft) return;
+      sessionDraft.exercises.splice(Number(id), 1);
+      renderSessionEditor();
+      break;
+    case "add-session-exercise": {
+      if (!sessionDraft) return;
+      const exId = $("#session-add-select")?.value;
+      const ex = state.exercises.find(e => e.id === exId);
+      if (!ex) return;
+      const max = maxRecordedWeight(ex.id);
+      sessionDraft.exercises.push({
+        exerciseId: ex.id, name: ex.name, image: ex.image || "",
+        sets: 3, reps: "10", weight: max ? String(max) : ""
+      });
+      renderSessionEditor();
+      break;
+    }
     case "delete-session":
       if (confirm("¿Eliminar esta sesión del historial?")) {
         state.sessions = state.sessions.filter(s => s.id !== id);
@@ -1513,8 +1992,27 @@ function handleAction(action, id, date, button = null) {
 // ---------- CALENDARIO: SELECCIÓN DE PLAN ----------
 
 function openDay(date) {
+  const daySessions = state.sessions.filter(s => s.date === date);
+  const existing = daySessions.length ? `
+    <div class="day-sessions">
+      <span class="field-label">Entrenamientos de este día</span>
+      ${daySessions.map(s => `
+        <div class="day-session-row">
+          <div>
+            <strong>${escapeHTML(s.planName)}</strong>
+            <small>${plural(s.exercises.length, "ejercicio", "ejercicios")}</small>
+          </div>
+          <span class="category-manage-actions">
+            <button class="btn ghost small" data-action="view-session" data-id="${s.id}">Ver</button>
+            <button class="btn secondary small" data-action="edit-session" data-id="${s.id}">Editar</button>
+          </span>
+        </div>`).join("")}
+    </div>
+    <h3 style="margin-top:20px">Añadir otro entrenamiento</h3>` : "";
+
   openModal(`
-    <h2>Entrenar el ${formatDate(date)}</h2>
+    <h2>${daySessions.length ? "" : "Entrenar el "}${formatDate(date)}</h2>
+    ${existing}
     <p class="muted">Elige un plan o registra un entrenamiento libre.</p>
     ${state.plans.length ? `
       <div class="field">
@@ -1607,6 +2105,10 @@ $("#modal-content").addEventListener("submit", event => {
     }
   }
 
+  if (form.id === "session-edit-form") {
+    saveSessionDraft();
+  }
+
   if (form.id === "session-form") {
     const plan = state.plans.find(p => p.id === form.dataset.plan);
     const isFree = form.dataset.free === "true";
@@ -1628,7 +2130,7 @@ $("#modal-content").addEventListener("submit", event => {
         image: exercise?.image || "",
         sets: Math.max(0, Number(data.get(`sets-${exerciseId}`)) || 0),
         reps: String(data.get(`reps-${exerciseId}`) || ""),
-        weight: String(data.get(`weight-${exerciseId}`) || "")
+        weight: String(data.get(`weight-${exerciseId}`) || "").replace(",", ".")
       };
     });
 
